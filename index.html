@@ -1380,7 +1380,7 @@ function TagPicker({ tags, onChange, activeTagPresets, onDeletePreset, onAddPres
 
   // Add as one-time custom tag to this trade
   const addCustom = () => {
-    const v = custom.trim().toLowerCase().replace(/\s+/g,"-");
+    const v = custom.trim();
     if (!v || active.includes(v)) return;
     onChange([...active, v]);
     setCustom("");
@@ -1390,7 +1390,7 @@ function TagPicker({ tags, onChange, activeTagPresets, onDeletePreset, onAddPres
   const addPreset = () => {
     const label = newLabel.trim();
     if (!label) return;
-    const id = label.toLowerCase().replace(/\s+/g,"-") + "-" + Math.random().toString(36).slice(2,5);
+    const id = label;
     onAddPreset({ id, label, color: newColor });
     setNewLabel(""); setShowAddPreset(false);
   };
@@ -2784,7 +2784,7 @@ const TradeCard = React.memo(function TradeCard({ trade, onEdit, onDelete, activ
 );
 
 // ─── STATS ────────────────────────────────────────────────────────────────────
-function Stats({ trades, onExportReady, onShowPDF }) {
+function Stats({ trades, activeTagPresets, archives, onExportReady, onShowPDF }) {
   const [fPairs,setFPairs] = useState([]);
   const [fExecs,setFExecs] = useState([]);
   const [fSL,setFSL]       = useState([]);
@@ -2801,6 +2801,7 @@ function Stats({ trades, onExportReady, onShowPDF }) {
   const [uSearchHistory,setUSearchHistory] = useState([]);
 
   const [fTrailingModel,setFTrailingModel] = useState([]); // trailing sub-model filter
+  const [fFolder,setFFolder] = useState([]); // folder filter (folder id, or "__none__" untuk tanpa folder)
 
   // Date/time filter
   const [fDateMode,setFDateMode] = useState("all"); // "all"|"year"|"month"|"range"
@@ -2813,10 +2814,11 @@ function Stats({ trades, onExportReady, onShowPDF }) {
     const s = new Set();
     trades.forEach(t=>(t.tags||[]).forEach(tag=>s.add(tag)));
     // Sort: presets first (in preset order), then custom alpha
-    const preset = TAG_PRESETS.map(t=>t.id).filter(id=>s.has(id));
-    const custom  = [...s].filter(id=>!TAG_PRESETS.find(t=>t.id===id)).sort();
+    const allPresetIds = (activeTagPresets||TAG_PRESETS).map(t=>t.id);
+    const preset = allPresetIds.filter(id=>s.has(id));
+    const custom  = [...s].filter(id=>!allPresetIds.includes(id)).sort();
     return [...preset, ...custom];
-  },[trades]);
+  },[trades, activeTagPresets]);
 
   const allSessions = useMemo(()=>{
     const s = new Set();
@@ -2831,6 +2833,50 @@ function Stats({ trades, onExportReady, onShowPDF }) {
   },[trades]);
 
   const pairs = useMemo(()=>allPairs(trades),[trades]);
+
+  // ── FOLDER FILTER — data turunan dari archives (folder tree) ──
+  const safeArchives = archives || [];
+  const flatFolders = useMemo(()=>{
+    const result = [];
+    const walk = (arr, depth=0, parentPath="") => {
+      arr.forEach(f=>{
+        const path = parentPath ? `${parentPath} / ${f.name}` : f.name;
+        result.push({ id:f.id, name:f.name, depth, path });
+        if (f.children?.length) walk(f.children, depth+1, path);
+      });
+    };
+    walk(safeArchives);
+    return result;
+  },[safeArchives]);
+
+  // folderId → [folderId, ...semua id descendant] — supaya pilih folder induk otomatis mencakup subfolder
+  const folderDescendantIds = useMemo(()=>{
+    const map = {};
+    const collect = (folder) => {
+      const ids = [folder.id];
+      (folder.children||[]).forEach(c => ids.push(...collect(c)));
+      map[folder.id] = ids;
+      return ids;
+    };
+    const walkAll = arr => arr.forEach(f => collect(f));
+    walkAll(safeArchives);
+    return map;
+  },[safeArchives]);
+
+  // tradeId → folderId (folder langsung/terdalam tempat trade berada)
+  const tradeFolderId = useMemo(()=>{
+    const map = {};
+    const assign = arr => {
+      arr.forEach(f=>{
+        (f.tradeIds||[]).forEach(id => { map[id] = f.id; });
+        if (f.children?.length) assign(f.children);
+      });
+    };
+    assign(safeArchives);
+    return map;
+  },[safeArchives]);
+
+  const hasFolders = flatFolders.length > 0;
 
   const allRRs = useMemo(()=>{
     const s = new Set();
@@ -2909,7 +2955,7 @@ function Stats({ trades, onExportReady, onShowPDF }) {
   const uSuggestions = useMemo(()=>{
     const q = uSearch.trim().toLowerCase();
     const groups = [];
-    const getTag = id => TAG_PRESETS.find(t=>t.id===id)||{id,label:id,color:C.purple};
+    const getTag = id => (activeTagPresets||[]).find(t=>t.id===id)||TAG_PRESETS.find(t=>t.id===id)||{id,label:id,color:C.purple};
     if (q) {
       const tagItems = allTags
         .filter(id=>{ const t=getTag(id); return t.label.toLowerCase().includes(q)||id.toLowerCase().includes(q); })
@@ -2935,9 +2981,19 @@ function Stats({ trades, onExportReady, onShowPDF }) {
         .filter(s=>s.toLowerCase().includes(q))
         .map(s=>({type:"sess",val:s,label:s,color:C.yellow}));
       if (sessItems.length) groups.push({header:"🕐 SESI",items:sessItems});
+
+      const slNoteItems = allSlNotesTokens
+        .filter(n=>n.toLowerCase().includes(q))
+        .map(n=>({type:"slNote",val:n,label:n,color:C.red}));
+      if (slNoteItems.length) groups.push({header:"🛡 KETERANGAN SL",items:slNoteItems});
+
+      const targetNoteItems = allTargetNotesTokens
+        .filter(n=>n.toLowerCase().includes(q))
+        .map(n=>({type:"targetNote",val:n,label:n,color:C.yellow}));
+      if (targetNoteItems.length) groups.push({header:"🎯 KETERANGAN TARGET",items:targetNoteItems});
     }
     return groups;
-  },[uSearch,allTags,allNotesTokens,pairs,allRRs]);
+  },[uSearch,allTags,allNotesTokens,allSlNotesTokens,allTargetNotesTokens,pairs,allRRs,activeTagPresets]);
 
   const tog = (arr,setArr,val) =>
     setArr(arr.includes(val)?arr.filter(x=>x!==val):[...arr,val]);
@@ -2960,6 +3016,7 @@ function Stats({ trades, onExportReady, onShowPDF }) {
     else if(which==="search") setUSearch("");
     else if(which==="trailingModel") setFTrailingModel([]);
     else if(which==="date") { setFDateMode("all"); setFYear(""); setFMonth(""); setFDateFrom(""); setFDateTo(""); }
+    else if(which==="folder") setFFolder([]);
   };
 
   const FilterChips = ({label,color,items,active,onToggle,getLabel,onReset}) => (
@@ -2996,11 +3053,13 @@ function Stats({ trades, onExportReady, onShowPDF }) {
         const sessEntry = inst.sessionsEntry||[];
         const sessExit  = inst.sessionsExit||[];
         const meta = {pair,execId:inst.type,execLabel,tags:tradeTags,direction,sessEntry,sessExit,
-          tradeDate,
+          tradeDate, folderId: tradeFolderId[t.id] || null,
           notes:t.notes||"", notesArr:Array.isArray(t.notesArr)&&t.notesArr.length>0?t.notesArr
             :(t.notes||"").split(" + ").map(n=>n.trim()).filter(Boolean),
-          slNotes:     inst.slNotes     || "",
-          targetNotes: inst.targetNotes || "",
+          slNotes:      inst.slNotes      || "",
+          targetNotes:  inst.targetNotes  || "",
+          targetRange:  inst.targetRange  || "",
+          execSlPips:   inst.slPips       || "",
         };
         // Helper: get hold duration for a specific RR close time
         // Priority: rrTimes[rr] from the section → inst.holdingMins as fallback
@@ -3056,6 +3115,12 @@ function Stats({ trades, onExportReady, onShowPDF }) {
     });
 
     let filtered = points;
+    if (fFolder.length) filtered = filtered.filter(p=>
+      fFolder.some(fid=>{
+        if (fid === "__none__") return !p.folderId;
+        return p.folderId && (folderDescendantIds[fid]||[]).includes(p.folderId);
+      })
+    );
     if (fPairs.length) filtered = filtered.filter(p=>fPairs.includes(p.pair));
     if (fExecs.length) filtered = filtered.filter(p=>fExecs.includes(p.execId));
     if (fSL.length)    filtered = filtered.filter(p=>fSL.includes(p.slType));
@@ -3250,6 +3315,208 @@ function Stats({ trades, onExportReady, onShowPDF }) {
       avgHoldMins: r.holdCount > 0 ? r.holdSum / r.holdCount : 0,
     }));
 
+    // ── Target Range Analytics ──
+    // Collect one entry per unique exec instance (deduplicated by tradeDate+pair+execLabel)
+    // to avoid double-counting when a single exec has multiple RR points.
+    const execInstancesSeen = new Set();
+    const targetRangeData   = []; // { targetRatioNum, slPipsNum, tradeKey }
+    filtered.forEach(p => {
+      const key = `${p.tradeDate}||${p.pair}||${p.execLabel}`;
+      if (execInstancesSeen.has(key)) return;
+      execInstancesSeen.add(key);
+      const tr = parseFloat((p.targetRange||"").replace(/^1:/,""));
+      const sl = parseFloat(p.execSlPips||p.slPips||"");
+      if (!isNaN(tr) && tr > 0 && !isNaN(sl) && sl > 0) {
+        targetRangeData.push({ targetRatioNum: tr, slPipsNum: sl, tradeKey: key });
+      }
+    });
+
+    // avg target range
+    const avgTargetRange = targetRangeData.length
+      ? targetRangeData.reduce((a,b)=>a+b.targetRatioNum,0) / targetRangeData.length
+      : null;
+
+    // avg SL pips, min SL, max SL (from all exec instances in filtered)
+    const allSlPips = targetRangeData.map(d=>d.slPipsNum);
+    const avgSlPips = allSlPips.length ? allSlPips.reduce((a,b)=>a+b,0)/allSlPips.length : null;
+    const minSlPips = allSlPips.length ? Math.min(...allSlPips) : null;
+    const maxSlPips = allSlPips.length ? Math.max(...allSlPips) : null;
+
+    // Also collect all exec instances even those without targetRange for pure SL stats
+    const execSlSeen = new Set();
+    const allExecSlList = [];
+    filtered.forEach(p => {
+      const key = `${p.tradeDate}||${p.pair}||${p.execLabel}`;
+      if (execSlSeen.has(key)) return;
+      execSlSeen.add(key);
+      const sl = parseFloat(p.execSlPips||p.slPips||"");
+      if (!isNaN(sl) && sl > 0) allExecSlList.push({ sl, pair:p.pair, direction:p.direction, tradeDate:p.tradeDate, execLabel:p.execLabel });
+    });
+    const avgSlPipsAll  = allExecSlList.length ? allExecSlList.reduce((a,b)=>a+b.sl,0)/allExecSlList.length : null;
+    const minSlPipsAll  = allExecSlList.length ? Math.min(...allExecSlList.map(x=>x.sl)) : null;
+    const maxSlPipsAll  = allExecSlList.length ? Math.max(...allExecSlList.map(x=>x.sl)) : null;
+    // Entries for min/max SL for display
+    const minSlEntries  = allExecSlList.filter(x=>x.sl===minSlPipsAll);
+    const maxSlEntries  = allExecSlList.filter(x=>x.sl===maxSlPipsAll);
+
+    // ── RR hit count considering target range ──
+    // For each RR level that appears in filtered wins, count how many exec instances
+    // had that RR ≤ their own target range (i.e. that RR was "valid/reachable" for that trade).
+    // Group: for each whole-number RR from 1 to globalMaxTarget, count trades that include it.
+    const globalMaxTarget = targetRangeData.length
+      ? Math.max(...targetRangeData.map(d=>d.targetRatioNum))
+      : 0;
+
+    // Build map: execKey → targetRatioNum
+    const execTargetMap = {};
+    targetRangeData.forEach(d => { execTargetMap[d.tradeKey] = d.targetRatioNum; });
+
+    // Collect all distinct RR values that appear in filtered win points
+    const allWinRRNums = new Set();
+    filtered.forEach(p => {
+      if (p.outcomeType !== "win") return;
+      const r = parseFloat(p.rr?.split(":")[1]);
+      if (!isNaN(r) && r > 0) allWinRRNums.add(r);
+    });
+
+    // For each RR, compute: how many exec instances have targetRange >= that RR
+    // AND how many of those actually hit that RR (win)
+    // rrRangeStats[rr] = { rr, validTotal, hitCount, hitPct, avgWinPips, winPipsList[] }
+    const rrRangeStats = {};
+    // Step 1: for each unique RR from 1 to globalMaxTarget (integer steps + decimal wins)
+    const rrCandidates = new Set();
+    for (let i = 1; i <= Math.ceil(globalMaxTarget); i++) rrCandidates.add(i);
+    allWinRRNums.forEach(r => rrCandidates.add(r));
+
+    rrCandidates.forEach(rrNum => {
+      const rrKey = `1:${rrNum}`;
+      // How many exec instances have this RR within their target range?
+      const validExecs = targetRangeData.filter(d => d.targetRatioNum >= rrNum);
+      if (validExecs.length === 0) return;
+      // How many filtered win points hit exactly this RR? (deduplicated by execKey)
+      const hitExecKeys = new Set();
+      let winPipsSum = 0, winPipsCnt = 0;
+      filtered.forEach(p => {
+        if (p.outcomeType !== "win") return;
+        const r = parseFloat(p.rr?.split(":")[1]);
+        if (Math.abs(r - rrNum) > 0.001) return;
+        const ek = `${p.tradeDate}||${p.pair}||${p.execLabel}`;
+        // Only count if this exec's target range covers this RR
+        const tgt = execTargetMap[ek] ?? Infinity; // if no target set, always valid
+        if (tgt < rrNum) return;
+        if (!hitExecKeys.has(ek)) {
+          hitExecKeys.add(ek);
+          const sl = parseFloat(p.slPips||"");
+          if (sl > 0) { winPipsSum += r * sl; winPipsCnt++; }
+        }
+      });
+      rrRangeStats[rrKey] = {
+        rr: rrKey, rrNum,
+        validTotal: validExecs.length,
+        hitCount: hitExecKeys.size,
+        hitPct: validExecs.length > 0 ? Math.round(hitExecKeys.size / validExecs.length * 100) : 0,
+        avgWinPips: winPipsCnt > 0 ? winPipsSum / winPipsCnt : null,
+      };
+    });
+    // Sort by RR value
+    const rrRangeStatsList = Object.values(rrRangeStats)
+      .filter(r => r.validTotal > 0)
+      .sort((a,b) => a.rrNum - b.rrNum);
+
+    // ── Win pips distribution per RR (with target-range awareness for display) ──
+    // For each win RR, list of { execKey, pair, direction, slPips, winPips, targetRange }
+    const winPipsPerRR = {};
+    filtered.forEach(p => {
+      if (p.outcomeType !== "win") return;
+      const r = parseFloat(p.rr?.split(":")[1]);
+      if (isNaN(r) || r <= 0) return;
+      const sl = parseFloat(p.slPips||"");
+      if (sl <= 0) return;
+      const ek = `${p.tradeDate}||${p.pair}||${p.execLabel}`;
+      const tgt = parseFloat((p.targetRange||"").replace(/^1:/,""));
+      if (!winPipsPerRR[p.rr]) winPipsPerRR[p.rr] = { rr:p.rr, rrNum:r, entries:[] };
+      if (!winPipsPerRR[p.rr].entries.find(e=>e.execKey===ek)) {
+        winPipsPerRR[p.rr].entries.push({
+          execKey: ek, pair: p.pair, direction: p.direction,
+          slPips: sl, winPips: r*sl,
+          targetRange: isNaN(tgt)||tgt<=0 ? null : tgt,
+          tradeDate: p.tradeDate,
+        });
+      }
+    });
+    const winPipsPerRRList = Object.values(winPipsPerRR).sort((a,b)=>a.rrNum-b.rrNum);
+
+    // ── Loss pips per RR — detail per trade (parallel to win pips) ──
+    const lossPipsPerRR = {};
+    filtered.forEach(p => {
+      if (p.outcomeType !== "loss") return;
+      const sl = parseFloat(p.slPips||"");
+      if (sl <= 0) return;
+      const rrKey = p.rr || "(global)";
+      const rrNum = p.rr ? parseFloat(p.rr.split(":")[1]) : 0;
+      const ek = `${p.tradeDate}||${p.pair}||${p.execLabel}`;
+      const tgt = parseFloat((p.targetRange||"").replace(/^1:/,""));
+      if (!lossPipsPerRR[rrKey]) lossPipsPerRR[rrKey] = { rr:rrKey, rrNum, entries:[] };
+      if (!lossPipsPerRR[rrKey].entries.find(e=>e.execKey===ek)) {
+        lossPipsPerRR[rrKey].entries.push({
+          execKey: ek, pair: p.pair, direction: p.direction,
+          slPips: sl, lossPips: sl,
+          targetRange: isNaN(tgt)||tgt<=0 ? null : tgt,
+          tradeDate: p.tradeDate,
+        });
+      }
+    });
+    const lossPipsPerRRList = Object.values(lossPipsPerRR).sort((a,b)=>a.rrNum-b.rrNum);
+
+    // ── Hit Range (Max TP) Stats ──
+    // Count: from all exec instances in filtered, how many actually hit their own max target range?
+    // "Hit target range" = trade has a target range set AND the highest win RR for that exec >= target range
+    const hitRangeExecSeen = new Set();
+    let hitRangeTotal = 0; // exec instances with a valid target range
+    let hitRangeHit   = 0; // exec instances that hit their max target range
+    // Map execKey → { targetRatio, maxWinRatio }
+    const execMaxWinRR = {};
+    filtered.forEach(p => {
+      const ek = `${p.tradeDate}||${p.pair}||${p.execLabel}`;
+      const tgt = parseFloat((p.targetRange||"").replace(/^1:/,""));
+      if (!isNaN(tgt) && tgt > 0) {
+        if (!execMaxWinRR[ek]) execMaxWinRR[ek] = { targetRatio: tgt, maxWinRatio: 0, pair:p.pair, direction:p.direction, tradeDate:p.tradeDate };
+        if (p.outcomeType === "win") {
+          const r = parseFloat(p.rr?.split(":")[1]||"0");
+          if (r > execMaxWinRR[ek].maxWinRatio) execMaxWinRR[ek].maxWinRatio = r;
+        }
+      }
+    });
+    const hitRangeEntries = Object.values(execMaxWinRR);
+    hitRangeTotal = hitRangeEntries.length;
+    const hitRangeHitList   = hitRangeEntries.filter(e => e.maxWinRatio >= e.targetRatio);
+    const hitRangeMissList  = hitRangeEntries.filter(e => e.maxWinRatio < e.targetRatio);
+    hitRangeHit = hitRangeHitList.length;
+    const hitRangePct = hitRangeTotal > 0 ? Math.round(hitRangeHit / hitRangeTotal * 100) : 0;
+
+    // ── Enhanced perRR summary for RINCIAN table (gross totals + averages + net) ──
+    // Per execType → { grossWin, winCount, grossLoss, lossCount }
+    const perExecSummary = {};
+    results_perRRRows_placeholder: {
+      // built after perRRRows but we compute it fresh here from perRRMap content
+    }
+    // Recompute summary from perRRMap (already has pipsSum per key)
+    const perExecRRSummaryMap = {};
+    // We re-iterate filtered for exec-level gross sums
+    filtered.forEach(p => {
+      const sl = parseFloat(p.slPips||"");
+      const ratio = parseFloat(p.rr?.split(":")[1]);
+      if (!sl || sl <= 0) return;
+      const eid = p.execId;
+      if (!perExecRRSummaryMap[eid]) perExecRRSummaryMap[eid] = {
+        grossWin:0, winCnt:0, grossLoss:0, lossCnt:0, bepSum:0, bepCnt:0,
+      };
+      const s = perExecRRSummaryMap[eid];
+      if (p.outcomeType==="win" && ratio > 0) { s.grossWin += ratio*sl; s.winCnt++; }
+      else if (p.outcomeType==="loss") { s.grossLoss += sl; s.lossCnt++; }
+      else if (p.outcomeType==="bep" && p.bepPips!=null) { s.bepSum += p.bepPips; s.bepCnt++; }
+    });
+
     // ── Consecutive streak calculation ──
     // Sort filtered points by tradeDate, then group per trade (unique tradeDate+pair+direction)
     // We treat each trade execution (point) as one event in time order.
@@ -3260,16 +3527,19 @@ function Stats({ trades, onExportReady, onShowPDF }) {
       return 0;
     });
 
-    // Collapse consecutive same-trade points: a trade is one entry in the streak sequence.
-    // Key = tradeDate + pair + direction + execLabel; outcome priority: loss > bep > win
+    // Collapse per-execution: one entry per unique trade execution in the streak sequence.
+    // Key includes execKey (tradeDate+pair+execLabel) — different trades on same day are kept separate.
+    // Within one execution there can be multiple RR points (all hit/miss/bep);
+    // the execution's outcome = worst outcome among its points (loss > bep > win).
     const tradeSeqMap = new Map();
     timeOrderedPoints.forEach(p => {
-      const k = `${p.tradeDate}||${p.pair}||${p.direction}||${p.execLabel}`;
+      // Use execLabel which already encodes exec type+index, plus tradeDate+pair — this is unique per execution
+      const k = `${p.tradeDate}||${p.pair}||${p.direction}||${p.execLabel}||${p.slType}`;
       if (!tradeSeqMap.has(k)) {
         tradeSeqMap.set(k, { key:k, tradeDate:p.tradeDate, pair:p.pair,
           direction:p.direction, execLabel:p.execLabel, outcome: p.outcomeType });
       } else {
-        // Loss overrides bep/win; bep overrides win
+        // Loss overrides bep/win; bep overrides win — worst outcome wins
         const cur = tradeSeqMap.get(k).outcome;
         const next = p.outcomeType;
         const priority = {win:0, bep:1, loss:2};
@@ -3326,22 +3596,34 @@ function Stats({ trades, onExportReady, onShowPDF }) {
     return {
       rows:sorted, total, perRRRows,
       streak: { maxWin:maxWinStreak, maxLoss:maxLossStreak, curWin:curWinStreak, curLoss:curLossStreak, seqLen:seq.length },
+      targetRangeStats: {
+        avgTargetRange, targetRangeData,
+        avgSlPips: avgSlPipsAll, minSlPips: minSlPipsAll, maxSlPips: maxSlPipsAll,
+        minSlEntries, maxSlEntries,
+        execCount: allExecSlList.length,
+      },
+      hitRangeStats: { total: hitRangeTotal, hit: hitRangeHit, pct: hitRangePct, hitList: hitRangeHitList, missList: hitRangeMissList },
+      rrRangeStatsList,
+      winPipsPerRRList,
+      lossPipsPerRRList,
+      perExecRRSummaryMap,
       metrics:{
         grossWinP, grossLossP, bepMin, bepMax, isBepRange, bepBreakdown,
         netMinPips, netMaxPips,
         winCnt, lossCnt, bepCnt, avgHoldMins, profitFactor, avgRR,
         avgWinPips, avgLossPips, hasPips, expectancy, totalTrades,
-      filteredPoints: filtered
+        filteredPoints: filtered
       }
     };
-  },[trades,fPairs,fExecs,fSL,fOut,fRR,fTags,fDir,fSess,fNotes,fSlNotes,fTargetNotes,uSearch,fDateMode,fYear,fMonth,fDateFrom,fDateTo,fTrailingModel]);
+  },[trades,fPairs,fExecs,fSL,fOut,fRR,fTags,fDir,fSess,fNotes,fSlNotes,fTargetNotes,uSearch,fDateMode,fYear,fMonth,fDateFrom,fDateTo,fTrailingModel,fFolder,tradeFolderId,folderDescendantIds]);
 
   useEffect(() => {
     if (onExportReady) onExportReady({
-      points: results?.metrics?.filteredPoints || [],
+      points:  results?.metrics?.filteredPoints || [],
       metrics: results?.metrics || null,
+      results: results || null,
     });
-  }, [results?.metrics?.filteredPoints]);
+  }, [results]);
 
 
   if (!trades.length) return (
@@ -3496,7 +3778,7 @@ function Stats({ trades, onExportReady, onShowPDF }) {
                   )}
                 </div>
 
-                {/* ── Tabel Pip per RR aggregate ── */}
+                {/* ── Tabel Pip per RR aggregate — ENHANCED ── */}
                 {results.perRRRows.length>0 && (
                   <div style={{background:"#060a10",border:`1px solid ${C.border}`,
                     borderRadius:8,overflow:"hidden",marginTop:4}}>
@@ -3516,10 +3798,20 @@ function Stats({ trades, onExportReady, onShowPDF }) {
                           const et = EXEC_TYPES.find(e=>e.id===execId);
                           const byRR = {};
                           rows.forEach(r=>{ const k=r.rr||"(global)"; byRR[k]=byRR[k]||[]; byRR[k].push(r); });
+
+                          // Exec-level gross summary
+                          const S = results.perExecRRSummaryMap?.[execId] || {};
+                          const avgWin  = S.winCnt  > 0 ? S.grossWin  / S.winCnt  : null;
+                          const avgLoss = S.lossCnt > 0 ? S.grossLoss / S.lossCnt : null;
+                          const netTotal = (S.grossWin||0) + (S.bepSum||0) - (S.grossLoss||0);
+                          const convAvg = (avgWin!=null && avgLoss!=null) ? avgWin - avgLoss : null;
+
                           return (
-                            <div key={execId}>
+                            <div key={execId} style={{marginBottom:6}}>
                               <div style={{color:C.blue,fontSize:10,fontWeight:800,
                                 marginBottom:4}}>{et?.label||execId}</div>
+
+                              {/* Per-RR rows */}
                               {sortRR(Object.keys(byRR)).map(rr=>(
                                 <div key={rr} style={{display:"flex",alignItems:"center",
                                   gap:5,marginLeft:8,marginBottom:3,
@@ -3534,17 +3826,25 @@ function Stats({ trades, onExportReady, onShowPDF }) {
                                       const sub  = r.outcomeType==="bep"
                                         ?`${r.bepLabel||"?"} +${r.bepR??0}R`
                                         :r.slType==="trailing"?"trailing":"static";
+                                      // Gross total for this row
+                                      const grossTotal = r.pipsSum;
                                       return (
                                         <div key={ri} style={{background:col+"12",
                                           border:`1px solid ${col}25`,borderRadius:5,
-                                          padding:"2px 7px",display:"flex",flexDirection:"column",
+                                          padding:"3px 8px",display:"flex",flexDirection:"column",
                                           alignItems:"flex-start",gap:1}}>
+                                          {/* AVG per trade */}
                                           <span style={{color:col,fontWeight:800,
                                             fontSize:10,fontFamily:"monospace"}}>
-                                            {icon} {val}
+                                            {icon} avg {val}
                                             {r.count>1&&<span style={{color:col+"66",fontSize:8,marginLeft:3}}>
                                               ×{r.count}
                                             </span>}
+                                          </span>
+                                          {/* Gross total */}
+                                          <span style={{color:col+"cc",fontWeight:700,
+                                            fontSize:9,fontFamily:"monospace"}}>
+                                            total {r.outcomeType==="loss"?fmtPips(-Math.abs(grossTotal)):fmtPips(grossTotal)}
                                           </span>
                                           <span style={{color:col+"77",fontSize:7.5}}>{sub}</span>
                                           {r.avgHoldMins>0&&(
@@ -3564,6 +3864,126 @@ function Stats({ trades, onExportReady, onShowPDF }) {
                                   </div>
                                 </div>
                               ))}
+
+                              {/* Summary bar: Gross Win | Gross Loss | Avg Win-Loss | Net — PER RR */}
+                              {(S.winCnt>0 || S.lossCnt>0) && (()=>{
+                                // Build per-RR net: for each RR, sum win pips - loss pips from perRRRows
+                                const rrNetMap = {};
+                                rows.forEach(r => {
+                                  const k = r.rr || "(global)";
+                                  if (!rrNetMap[k]) rrNetMap[k] = { win:0, loss:0, bep:0 };
+                                  if (r.outcomeType==="win")  rrNetMap[k].win  += r.pipsSum;
+                                  else if (r.outcomeType==="loss") rrNetMap[k].loss += Math.abs(r.pipsSum);
+                                  else if (r.outcomeType==="bep")  rrNetMap[k].bep  += r.pipsSum;
+                                });
+                                const rrNetEntries = sortRR(Object.keys(rrNetMap)).map(rr => ({
+                                  rr,
+                                  net: (rrNetMap[rr].win||0) + (rrNetMap[rr].bep||0) - (rrNetMap[rr].loss||0),
+                                  win: rrNetMap[rr].win||0,
+                                  loss: rrNetMap[rr].loss||0,
+                                })).filter(e => e.win > 0 || e.loss > 0);
+
+                                return (
+                                  <div style={{
+                                    marginLeft:8,marginTop:5,
+                                    background:"#0a0f1c",border:`1px solid ${C.border}`,
+                                    borderRadius:7,padding:"7px 10px",
+                                    display:"flex",flexDirection:"column",gap:5,
+                                  }}>
+                                    <div style={{color:C.faint,fontSize:8,letterSpacing:1.2,fontWeight:700,marginBottom:2}}>
+                                      RINGKASAN {et?.short||execId}
+                                    </div>
+
+                                    {/* Row: Gross Win + Gross Loss totals */}
+                                    <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                                      {S.grossWin>0&&(
+                                        <div style={{background:C.green+"10",border:`1px solid ${C.green}22`,
+                                          borderRadius:5,padding:"4px 9px",flex:1,minWidth:70}}>
+                                          <div style={{color:C.faint,fontSize:7.5,letterSpacing:0.8}}>GROSS WIN</div>
+                                          <div style={{color:C.green,fontWeight:900,fontSize:12,fontFamily:"monospace"}}>
+                                            {fmtPips(S.grossWin)}
+                                          </div>
+                                          {avgWin!=null&&(
+                                            <div style={{color:C.green+"88",fontSize:8,fontFamily:"monospace"}}>
+                                              avg {fmtPips(avgWin)}/trade
+                                            </div>
+                                          )}
+                                          <div style={{color:C.faint,fontSize:7.5}}>{S.winCnt} trade menang</div>
+                                        </div>
+                                      )}
+                                      {S.grossLoss>0&&(
+                                        <div style={{background:C.red+"10",border:`1px solid ${C.red}22`,
+                                          borderRadius:5,padding:"4px 9px",flex:1,minWidth:70}}>
+                                          <div style={{color:C.faint,fontSize:7.5,letterSpacing:0.8}}>GROSS LOSS</div>
+                                          <div style={{color:C.red,fontWeight:900,fontSize:12,fontFamily:"monospace"}}>
+                                            {fmtPips(-S.grossLoss)}
+                                          </div>
+                                          {avgLoss!=null&&(
+                                            <div style={{color:C.red+"88",fontSize:8,fontFamily:"monospace"}}>
+                                              avg {fmtPips(-avgLoss)}/trade
+                                            </div>
+                                          )}
+                                          <div style={{color:C.faint,fontSize:7.5}}>{S.lossCnt} trade kalah</div>
+                                        </div>
+                                      )}
+                                    </div>
+
+                                    {/* Row: Avg Win - Avg Loss + NET TOTAL */}
+                                    <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                                      {convAvg!=null&&(
+                                        <div style={{background:convAvg>=0?C.green+"0a":C.red+"0a",
+                                          border:`1px solid ${convAvg>=0?C.green+"33":C.red+"33"}`,
+                                          borderRadius:5,padding:"4px 9px",flex:1,minWidth:70}}>
+                                          <div style={{color:C.faint,fontSize:7.5,letterSpacing:0.8}}>AVG WIN − AVG LOSS</div>
+                                          <div style={{color:convAvg>=0?C.green:C.red,fontWeight:900,fontSize:12,fontFamily:"monospace"}}>
+                                            {fmtPips(convAvg)}
+                                          </div>
+                                          <div style={{color:C.faint,fontSize:7.5}}>per trade (konversi)</div>
+                                        </div>
+                                      )}
+                                      <div style={{
+                                        background:netTotal>=0?C.green+"0a":C.red+"0a",
+                                        border:`1px solid ${netTotal>=0?C.green+"44":C.red+"44"}`,
+                                        borderRadius:5,padding:"4px 9px",flex:1,minWidth:70}}>
+                                        <div style={{color:C.faint,fontSize:7.5,letterSpacing:0.8}}>NET TOTAL</div>
+                                        <div style={{color:netTotal>=0?C.green:C.red,fontWeight:900,fontSize:13,fontFamily:"monospace"}}>
+                                          {fmtPips(netTotal)}
+                                        </div>
+                                        <div style={{color:C.faint,fontSize:7.5}}>
+                                          {S.bepCnt>0?`win+bep−loss · ${S.bepCnt} BEP`:"gross win − gross loss"}
+                                        </div>
+                                      </div>
+                                    </div>
+
+                                    {/* Net per RR — hanya tampil RR yang relevan */}
+                                    {rrNetEntries.length > 0 && (
+                                      <div>
+                                        <div style={{color:C.faint,fontSize:7.5,letterSpacing:1,fontWeight:700,marginBottom:4}}>
+                                          NET PER RR
+                                        </div>
+                                        <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                                          {rrNetEntries.map(e=>(
+                                            <div key={e.rr} style={{
+                                              background:e.net>=0?C.green+"0d":C.red+"0d",
+                                              border:`1px solid ${e.net>=0?C.green+"33":C.red+"33"}`,
+                                              borderRadius:5,padding:"3px 9px",
+                                              display:"flex",flexDirection:"column",alignItems:"center",gap:1,
+                                            }}>
+                                              <span style={{color:C.yellow,fontSize:8,fontFamily:"monospace",fontWeight:700}}>{e.rr}</span>
+                                              <span style={{color:e.net>=0?C.green:C.red,fontWeight:900,fontSize:10,fontFamily:"monospace"}}>
+                                                {fmtPips(e.net)}
+                                              </span>
+                                              <span style={{color:C.faint,fontSize:7}}>
+                                                {e.win>0?`+${Math.round(e.win)}`:""}{e.win>0&&e.loss>0?" / ":""}{e.loss>0?`−${Math.round(e.loss)}`:""}
+                                              </span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })()}
                             </div>
                           );
                         });
@@ -3572,6 +3992,375 @@ function Stats({ trades, onExportReady, onShowPDF }) {
                   </div>
                 )}
               </>
+            )}
+
+            {/* ══ TARGET RANGE STATISTICS ══ */}
+            {(()=>{
+              const trs = results.targetRangeStats;
+              if (!trs || trs.execCount === 0) return null;
+              return (
+                <div style={{background:"#060a10",border:`1px solid ${C.yellow}33`,
+                  borderRadius:8,overflow:"hidden",marginTop:4}}>
+                  <div style={{background:"#0a0f1a",padding:"5px 12px",
+                    fontSize:9,color:C.yellow,fontWeight:800,letterSpacing:1.2,
+                    display:"flex",alignItems:"center",gap:8}}>
+                    🎯 STATISTIK TARGET RANGE
+                    <span style={{color:C.faint,fontWeight:400,fontSize:8,letterSpacing:0}}>
+                      basis {trs.execCount} eksekusi
+                    </span>
+                  </div>
+                  <div style={{padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
+
+                    {/* Row 1: avg target range + SL stats */}
+                    <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                      {trs.avgTargetRange!=null&&(
+                        <div style={{background:C.yellow+"10",border:`1px solid ${C.yellow}22`,
+                          borderRadius:7,padding:"7px 12px",flex:1,minWidth:80,textAlign:"center"}}>
+                          <div style={{color:C.yellow,fontWeight:900,fontSize:15,fontFamily:"monospace"}}>
+                            1:{trs.avgTargetRange.toFixed(1)}
+                          </div>
+                          <div style={{color:C.faint,fontSize:8,letterSpacing:0.8,marginTop:2}}>AVG TARGET RANGE</div>
+                        </div>
+                      )}
+                      {trs.avgSlPips!=null&&(
+                        <div style={{background:C.red+"10",border:`1px solid ${C.red}22`,
+                          borderRadius:7,padding:"7px 12px",flex:1,minWidth:80,textAlign:"center"}}>
+                          <div style={{color:C.red,fontWeight:900,fontSize:15,fontFamily:"monospace"}}>
+                            {Math.round(trs.avgSlPips)}p
+                          </div>
+                          <div style={{color:C.faint,fontSize:8,letterSpacing:0.8,marginTop:2}}>AVG SL PIPS</div>
+                        </div>
+                      )}
+                      {trs.minSlPips!=null&&(
+                        <div style={{background:C.green+"0a",border:`1px solid ${C.green}22`,
+                          borderRadius:7,padding:"7px 12px",flex:1,minWidth:80,textAlign:"center"}}>
+                          <div style={{color:C.green,fontWeight:900,fontSize:15,fontFamily:"monospace"}}>
+                            {trs.minSlPips}p
+                          </div>
+                          <div style={{color:C.faint,fontSize:8,letterSpacing:0.8,marginTop:2}}>SL TERKECIL</div>
+                          {trs.minSlEntries.slice(0,2).map((e,i)=>(
+                            <div key={i} style={{color:C.green+"88",fontSize:7.5,marginTop:1,fontFamily:"monospace"}}>
+                              {e.pair} · {e.tradeDate?.slice(5)||"—"}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {trs.maxSlPips!=null&&(
+                        <div style={{background:C.red+"0a",border:`1px solid ${C.red}22`,
+                          borderRadius:7,padding:"7px 12px",flex:1,minWidth:80,textAlign:"center"}}>
+                          <div style={{color:C.red,fontWeight:900,fontSize:15,fontFamily:"monospace"}}>
+                            {trs.maxSlPips}p
+                          </div>
+                          <div style={{color:C.faint,fontSize:8,letterSpacing:0.8,marginTop:2}}>SL TERBESAR</div>
+                          {trs.maxSlEntries.slice(0,2).map((e,i)=>(
+                            <div key={i} style={{color:C.red+"88",fontSize:7.5,marginTop:1,fontFamily:"monospace"}}>
+                              {e.pair} · {e.tradeDate?.slice(5)||"—"}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Row 2: target range per-trade list (compact) */}
+                    {trs.targetRangeData.length > 0 && (
+                      <div>
+                        <div style={{color:C.faint,fontSize:8,letterSpacing:1.2,marginBottom:5,fontWeight:700}}>
+                          DETAIL TARGET RANGE PER EKSEKUSI
+                        </div>
+                        <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                          {trs.targetRangeData.map((d,i)=>(
+                            <div key={i} style={{background:C.yellow+"0d",border:`1px solid ${C.yellow}22`,
+                              borderRadius:5,padding:"3px 8px",fontSize:10,
+                              fontFamily:"monospace",color:C.yellow}}>
+                              1:{d.targetRatioNum%1===0?d.targetRatioNum:d.targetRatioNum.toFixed(1)}
+                              <span style={{color:C.faint,fontSize:8,marginLeft:4}}>
+                                SL:{d.slPipsNum}p
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* ══ HIT RANGE / MAX TP STATS ══ */}
+            {(()=>{
+              const hrs = results.hitRangeStats;
+              if (!hrs || hrs.total === 0) return null;
+              return (
+                <div style={{background:"#060a10",border:`1px solid ${C.yellow}44`,
+                  borderRadius:8,overflow:"hidden",marginTop:4}}>
+                  <div style={{background:"#0a0f1a",padding:"5px 12px",
+                    fontSize:9,color:C.yellow,fontWeight:800,letterSpacing:1.2,
+                    display:"flex",alignItems:"center",gap:8}}>
+                    🏆 HIT RANGE / MAX TP
+                    <span style={{color:C.faint,fontWeight:400,fontSize:8,letterSpacing:0}}>
+                      berapa trade yang mencapai target range penuh (max TP)
+                    </span>
+                  </div>
+                  <div style={{padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
+
+                    {/* Main stat row */}
+                    <div style={{display:"flex",gap:6,alignItems:"stretch"}}>
+                      {/* Hit count */}
+                      <div style={{background:C.yellow+"12",border:`1px solid ${C.yellow}33`,
+                        borderRadius:7,padding:"8px 12px",flex:1,textAlign:"center"}}>
+                        <div style={{color:C.yellow,fontWeight:900,fontSize:22,fontFamily:"monospace",lineHeight:1}}>
+                          {hrs.hit}
+                        </div>
+                        <div style={{color:C.faint,fontSize:8,letterSpacing:0.8,marginTop:3}}>TRADE HIT MAX TP</div>
+                        <div style={{color:C.dim,fontSize:9,marginTop:2}}>dari {hrs.total} total</div>
+                      </div>
+                      {/* Pct */}
+                      <div style={{background:hrs.pct>=60?C.green+"12":hrs.pct>=40?C.yellow+"12":C.red+"12",
+                        border:`1px solid ${hrs.pct>=60?C.green:hrs.pct>=40?C.yellow:C.red}33`,
+                        borderRadius:7,padding:"8px 12px",flex:1,textAlign:"center"}}>
+                        <div style={{color:hrs.pct>=60?C.green:hrs.pct>=40?C.yellow:C.red,
+                          fontWeight:900,fontSize:22,fontFamily:"monospace",lineHeight:1}}>
+                          {hrs.pct}%
+                        </div>
+                        <div style={{color:C.faint,fontSize:8,letterSpacing:0.8,marginTop:3}}>HIT RATE MAX TP</div>
+                        <div style={{color:C.faint,fontSize:8,marginTop:2,fontStyle:"italic"}}>
+                          {hrs.pct>=60?"✓ Konsisten hit target":"⚠ Target belum optimal"}
+                        </div>
+                      </div>
+                      {/* Miss count */}
+                      <div style={{background:C.red+"0a",border:`1px solid ${C.red}22`,
+                        borderRadius:7,padding:"8px 12px",flex:1,textAlign:"center"}}>
+                        <div style={{color:C.red,fontWeight:900,fontSize:22,fontFamily:"monospace",lineHeight:1}}>
+                          {hrs.total - hrs.hit}
+                        </div>
+                        <div style={{color:C.faint,fontSize:8,letterSpacing:0.8,marginTop:3}}>TIDAK HIT MAX TP</div>
+                      </div>
+                    </div>
+
+                    {/* Progress bar */}
+                    <div style={{height:6,background:C.faint+"33",borderRadius:20,overflow:"hidden"}}>
+                      <div style={{
+                        width:`${hrs.pct}%`,height:"100%",
+                        background:hrs.pct>=60?C.green:hrs.pct>=40?C.yellow:C.red,
+                        borderRadius:20,transition:"width 0.4s",
+                      }}/>
+                    </div>
+
+                    {/* Detail chips — which trades hit / missed */}
+                    {hrs.hitList.length > 0 && (
+                      <div>
+                        <div style={{color:C.green,fontSize:8,letterSpacing:1,fontWeight:700,marginBottom:4}}>
+                          ✓ HIT MAX TP ({hrs.hitList.length})
+                        </div>
+                        <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                          {hrs.hitList.map((e,i)=>(
+                            <div key={i} style={{background:C.green+"0d",border:`1px solid ${C.green}25`,
+                              borderRadius:5,padding:"2px 8px",fontSize:9,fontFamily:"monospace",
+                              display:"flex",alignItems:"center",gap:5}}>
+                              <span style={{color:e.direction==="Buy"?C.green:C.red,fontWeight:700}}>
+                                {e.direction==="Buy"?"▲":"▼"}
+                              </span>
+                              <span style={{color:C.text}}>{e.pair}</span>
+                              <span style={{color:C.yellow,fontSize:8}}>
+                                🎯1:{e.targetRatio%1===0?e.targetRatio:e.targetRatio.toFixed(1)}
+                              </span>
+                              <span style={{color:C.green,fontSize:8}}>hit 1:{e.maxWinRatio%1===0?e.maxWinRatio:e.maxWinRatio.toFixed(1)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {hrs.missList.length > 0 && (
+                      <div>
+                        <div style={{color:C.red,fontSize:8,letterSpacing:1,fontWeight:700,marginBottom:4}}>
+                          ✕ TIDAK HIT MAX TP ({hrs.missList.length})
+                        </div>
+                        <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                          {hrs.missList.map((e,i)=>(
+                            <div key={i} style={{background:C.red+"0d",border:`1px solid ${C.red}25`,
+                              borderRadius:5,padding:"2px 8px",fontSize:9,fontFamily:"monospace",
+                              display:"flex",alignItems:"center",gap:5}}>
+                              <span style={{color:e.direction==="Buy"?C.green:C.red,fontWeight:700}}>
+                                {e.direction==="Buy"?"▲":"▼"}
+                              </span>
+                              <span style={{color:C.text}}>{e.pair}</span>
+                              <span style={{color:C.yellow,fontSize:8}}>
+                                🎯1:{e.targetRatio%1===0?e.targetRatio:e.targetRatio.toFixed(1)}
+                              </span>
+                              <span style={{color:C.red,fontSize:8}}>
+                                max 1:{e.maxWinRatio>0?(e.maxWinRatio%1===0?e.maxWinRatio:e.maxWinRatio.toFixed(1)):"—"}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* ══ RR RANGE STATS: berapa kali tiap RR terkena dari trade yang memiliki target ≥ RR ══ */}
+            {results.rrRangeStatsList.length > 0 && (
+              <div style={{background:"#060a10",border:`1px solid ${C.green}33`,
+                borderRadius:8,overflow:"hidden",marginTop:4}}>
+                <div style={{background:"#0a0f1a",padding:"5px 12px",
+                  fontSize:9,color:C.green,fontWeight:800,letterSpacing:1.2,
+                  display:"flex",alignItems:"center",gap:8}}>
+                  📊 HIT RATE PER RR (BERDASARKAN TARGET RANGE)
+                  <span style={{color:C.faint,fontWeight:400,fontSize:8,letterSpacing:0}}>
+                    hanya trade yang target range-nya ≥ RR tersebut yang dihitung
+                  </span>
+                </div>
+                <div style={{padding:"10px 12px"}}>
+                  <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                    {results.rrRangeStatsList.map(r=>(
+                      <div key={r.rr} style={{display:"flex",alignItems:"center",gap:8,
+                        borderBottom:`1px solid ${C.faint}14`,paddingBottom:5}}>
+                        {/* RR label */}
+                        <span style={{color:C.yellow,fontWeight:800,fontSize:11,
+                          fontFamily:"monospace",minWidth:38,flexShrink:0}}>{r.rr}</span>
+                        {/* Progress bar */}
+                        <div style={{flex:1,height:6,background:C.faint+"33",borderRadius:20,overflow:"hidden"}}>
+                          <div style={{
+                            width:`${r.hitPct}%`,height:"100%",
+                            background:r.hitPct>=60?C.green:r.hitPct>=40?C.yellow:C.red,
+                            borderRadius:20,transition:"width 0.4s",
+                          }}/>
+                        </div>
+                        {/* Pct */}
+                        <span style={{
+                          color:r.hitPct>=60?C.green:r.hitPct>=40?C.yellow:C.red,
+                          fontWeight:900,fontSize:12,fontFamily:"monospace",minWidth:38,textAlign:"right",
+                        }}>{r.hitPct}%</span>
+                        {/* Count fraction */}
+                        <span style={{color:C.dim,fontSize:10,fontFamily:"monospace",minWidth:52}}>
+                          {r.hitCount}/{r.validTotal}
+                        </span>
+                        {/* Avg win pips */}
+                        {r.avgWinPips!=null&&(
+                          <span style={{background:C.green+"12",border:`1px solid ${C.green}25`,
+                            borderRadius:5,padding:"2px 7px",fontSize:9,
+                            color:C.green,fontWeight:800,fontFamily:"monospace",flexShrink:0}}>
+                            +{Math.round(r.avgWinPips)}p
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{color:C.faint,fontSize:8,marginTop:6,fontStyle:"italic"}}>
+                    Angka menunjukkan: dari semua trade yg target range-nya mencakup RR ini, berapa % yg berhasil hit.
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ══ WIN PIPS PER RR — detail per trade ══ */}
+            {results.winPipsPerRRList.length > 0 && (
+              <div style={{background:"#060a10",border:`1px solid ${C.green}22`,
+                borderRadius:8,overflow:"hidden",marginTop:4}}>
+                <div style={{background:"#0a0f1a",padding:"5px 12px",
+                  fontSize:9,color:C.green,fontWeight:800,letterSpacing:1.2}}>
+                  💰 DETAIL WIN PIPS PER RR
+                  <span style={{color:C.faint,fontWeight:400,fontSize:8,letterSpacing:0,marginLeft:8}}>
+                    hanya win — RR dikelompokkan sesuai target range trade
+                  </span>
+                </div>
+                <div style={{padding:"8px 12px",display:"flex",flexDirection:"column",gap:6}}>
+                  {results.winPipsPerRRList.map(row=>(
+                    <div key={row.rr} style={{borderBottom:`1px solid ${C.faint}14`,paddingBottom:6}}>
+                      {/* RR header */}
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                        <span style={{color:C.yellow,fontWeight:800,fontSize:11,fontFamily:"monospace"}}>{row.rr}</span>
+                        <span style={{color:C.green,fontWeight:700,fontSize:10,fontFamily:"monospace"}}>
+                          avg +{Math.round(row.entries.reduce((a,b)=>a+b.winPips,0)/row.entries.length)}p
+                        </span>
+                        <span style={{color:C.faint,fontSize:9}}>×{row.entries.length}</span>
+                      </div>
+                      {/* Entries */}
+                      <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                        {row.entries.map((e,i)=>(
+                          <div key={i} style={{
+                            background:C.green+"0d",
+                            border:`1px solid ${e.targetRange!=null&&e.targetRange>=row.rrNum?C.green+"33":C.faint+"22"}`,
+                            borderRadius:5,padding:"3px 8px",fontSize:9,fontFamily:"monospace",
+                          }}>
+                            <span style={{color:e.direction==="Buy"?C.green:C.red,fontWeight:700,marginRight:4}}>
+                              {e.direction==="Buy"?"▲":"▼"}
+                            </span>
+                            <span style={{color:C.text}}>{e.pair}</span>
+                            <span style={{color:C.green,fontWeight:800,marginLeft:4}}>+{Math.round(e.winPips)}p</span>
+                            <span style={{color:C.faint,fontSize:8,marginLeft:4}}>SL:{e.slPips}p</span>
+                            {e.targetRange!=null&&(
+                              <span style={{
+                                color:e.targetRange>=row.rrNum?C.yellow:C.faint,
+                                fontSize:8,marginLeft:4,
+                              }}>
+                                🎯1:{e.targetRange%1===0?e.targetRange:e.targetRange.toFixed(1)}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ══ LOSS PIPS PER RR — detail per trade ══ */}
+            {results.lossPipsPerRRList.length > 0 && (
+              <div style={{background:"#060a10",border:`1px solid ${C.red}22`,
+                borderRadius:8,overflow:"hidden",marginTop:4}}>
+                <div style={{background:"#0a0f1a",padding:"5px 12px",
+                  fontSize:9,color:C.red,fontWeight:800,letterSpacing:1.2}}>
+                  🔻 DETAIL LOSS PIPS PER RR
+                  <span style={{color:C.faint,fontWeight:400,fontSize:8,letterSpacing:0,marginLeft:8}}>
+                    hanya loss — dikelompokkan per level RR
+                  </span>
+                </div>
+                <div style={{padding:"8px 12px",display:"flex",flexDirection:"column",gap:6}}>
+                  {results.lossPipsPerRRList.map(row=>(
+                    <div key={row.rr} style={{borderBottom:`1px solid ${C.faint}14`,paddingBottom:6}}>
+                      {/* RR header */}
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                        <span style={{color:C.yellow,fontWeight:800,fontSize:11,fontFamily:"monospace"}}>
+                          {row.rr==="(global)"?"LOSS langsung":row.rr}
+                        </span>
+                        <span style={{color:C.red,fontWeight:700,fontSize:10,fontFamily:"monospace"}}>
+                          avg −{Math.round(row.entries.reduce((a,b)=>a+b.lossPips,0)/row.entries.length)}p
+                        </span>
+                        <span style={{color:C.faint,fontSize:9}}>×{row.entries.length}</span>
+                        <span style={{color:C.red+"88",fontFamily:"monospace",fontSize:9}}>
+                          total −{Math.round(row.entries.reduce((a,b)=>a+b.lossPips,0))}p
+                        </span>
+                      </div>
+                      {/* Entries */}
+                      <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                        {row.entries.map((e,i)=>(
+                          <div key={i} style={{
+                            background:C.red+"0d",
+                            border:`1px solid ${C.red}22`,
+                            borderRadius:5,padding:"3px 8px",fontSize:9,fontFamily:"monospace",
+                          }}>
+                            <span style={{color:e.direction==="Buy"?C.green:C.red,fontWeight:700,marginRight:4}}>
+                              {e.direction==="Buy"?"▲":"▼"}
+                            </span>
+                            <span style={{color:C.text}}>{e.pair}</span>
+                            <span style={{color:C.red,fontWeight:800,marginLeft:4}}>−{Math.round(e.lossPips)}p</span>
+                            <span style={{color:C.faint,fontSize:8,marginLeft:4}}>SL:{e.slPips}p</span>
+                            {e.targetRange!=null&&(
+                              <span style={{color:C.yellow+"88",fontSize:8,marginLeft:4}}>
+                                🎯1:{e.targetRange%1===0?e.targetRange:e.targetRange.toFixed(1)}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
           </div>
         );
@@ -3583,8 +4372,8 @@ function Stats({ trades, onExportReady, onShowPDF }) {
         <div style={{color:C.text,fontWeight:800,fontSize:13,
           marginBottom:12,display:"flex",alignItems:"center",gap:8}}>
           🔍 Filter Rekap
-          {(fPairs.length||fExecs.length||fSL.length||fOut.length||fRR.length||fTags.length||fDir.length||fSess.length||fNotes.length||fSlNotes.length||fTargetNotes.length||uSearch.trim()||fDateMode!=="all"||fTrailingModel.length)>0&&(
-            <button onClick={()=>{setFPairs([]);setFExecs([]);setFSL([]);setFOut([]);setFRR([]);setFTags([]);setFDir([]);setFSess([]);setFNotes([]);setFSlNotes([]);setFTargetNotes([]);setUSearch("");setUSearchHistory([]);setFDateMode("all");setFYear("");setFMonth("");setFDateFrom("");setFDateTo("");setFTrailingModel([]);}}
+          {(fPairs.length||fExecs.length||fSL.length||fOut.length||fRR.length||fTags.length||fDir.length||fSess.length||fNotes.length||fSlNotes.length||fTargetNotes.length||uSearch.trim()||fDateMode!=="all"||fTrailingModel.length||fFolder.length)>0&&(
+            <button onClick={()=>{setFPairs([]);setFExecs([]);setFSL([]);setFOut([]);setFRR([]);setFTags([]);setFDir([]);setFSess([]);setFNotes([]);setFSlNotes([]);setFTargetNotes([]);setUSearch("");setUSearchHistory([]);setFDateMode("all");setFYear("");setFMonth("");setFDateFrom("");setFDateTo("");setFTrailingModel([]);setFFolder([]);}}
               style={{background:"none",border:`1px solid ${C.red}44`,color:C.red,
                 borderRadius:20,padding:"2px 10px",fontSize:10,cursor:"pointer",fontWeight:700}}>
               Reset Semua
@@ -3699,6 +4488,82 @@ function Stats({ trades, onExportReady, onShowPDF }) {
           );
         })()}
 
+        {/* ── FOLDER FILTER ── */}
+        {hasFolders && (
+          <div style={{marginBottom:12}}>
+            <div style={{...LBL,display:"block",marginBottom:6,color:C.yellow}}>
+              📁 FOLDER
+              <span style={{color:C.faint,fontWeight:400,fontSize:9,marginLeft:8,letterSpacing:0}}>
+                pilih satu/lebih · OR (salah satu cocok) · folder induk mencakup subfolder
+              </span>
+              {fFolder.length>0&&(
+                <button onClick={()=>resetFilter("folder")}
+                  style={{marginLeft:8,background:"none",border:"none",
+                    color:C.red,fontSize:10,cursor:"pointer",fontWeight:800,padding:0}}>
+                  × reset
+                </button>
+              )}
+            </div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+              <button onClick={()=>setFFolder([])}
+                style={{...chipBool(fFolder.length===0,C.yellow,true),padding:"4px 12px",fontSize:11}}>
+                Semua
+              </button>
+              {flatFolders.map(f=>{
+                const on = fFolder.includes(f.id);
+                return (
+                  <button key={f.id} onClick={()=>tog(fFolder,setFFolder,f.id)} style={{
+                    background: on ? C.yellow+"25" : C.card,
+                    border: `1px solid ${on ? C.yellow : C.border}`,
+                    color: on ? C.yellow : C.dim,
+                    borderRadius:20, padding: on ? "4px 6px 4px 11px" : "4px 11px",
+                    fontSize:11, fontWeight:700, cursor:"pointer", transition:"all 0.12s",
+                    display:"flex", alignItems:"center", gap:5,
+                    marginLeft: f.depth * 10,
+                  }}>
+                    {f.depth>0 && <span style={{opacity:0.5}}>└</span>}
+                    📁 {f.name}
+                    {on && (
+                      <span style={{
+                        background: C.yellow+"33", borderRadius:"50%",
+                        width:14, height:14, display:"flex", alignItems:"center",
+                        justifyContent:"center", fontSize:10, lineHeight:1, flexShrink:0,
+                      }}>×</span>
+                    )}
+                  </button>
+                );
+              })}
+              {(() => {
+                const on = fFolder.includes("__none__");
+                return (
+                  <button onClick={()=>tog(fFolder,setFFolder,"__none__")} style={{
+                    background: on ? C.yellow+"25" : C.card,
+                    border: `1px solid ${on ? C.yellow : C.border}`,
+                    color: on ? C.yellow : C.dim,
+                    borderRadius:20, padding: on ? "4px 6px 4px 11px" : "4px 11px",
+                    fontSize:11, fontWeight:700, cursor:"pointer", transition:"all 0.12s",
+                    display:"flex", alignItems:"center", gap:5,
+                  }}>
+                    🚫 Tanpa Folder
+                    {on && (
+                      <span style={{
+                        background: C.yellow+"33", borderRadius:"50%",
+                        width:14, height:14, display:"flex", alignItems:"center",
+                        justifyContent:"center", fontSize:10, lineHeight:1, flexShrink:0,
+                      }}>×</span>
+                    )}
+                  </button>
+                );
+              })()}
+            </div>
+            {fFolder.length>1&&(
+              <div style={{color:C.faint,fontSize:10,marginTop:5,fontStyle:"italic"}}>
+                Menampilkan trade dari folder: {fFolder.map(id=>id==="__none__"?"Tanpa Folder":(flatFolders.find(f=>f.id===id)?.name||id)).join(" atau ")}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* ── TAG FILTER (prominent, at top) ── */}
         {allTags.length > 0 && (
           <div style={{marginBottom:12}}>
@@ -3714,7 +4579,7 @@ function Stats({ trades, onExportReady, onShowPDF }) {
                 Semua
               </button>
               {allTags.map(id=>{
-                const tag = TAG_PRESETS.find(t=>t.id===id)||{id,label:id,color:C.purple};
+                const tag = (activeTagPresets||[]).find(t=>t.id===id)||TAG_PRESETS.find(t=>t.id===id)||{id,label:id,color:C.purple};
                 const on = fTags.includes(id);
                 return (
                   <button key={id} onClick={()=>tog(fTags,setFTags,id)} style={{
@@ -3887,11 +4752,13 @@ function Stats({ trades, onExportReady, onShowPDF }) {
         {/* Text search backup untuk keterangan legacy / pencarian bebas */}
         {(() => {
           const dispatchSuggestion = ({type,val}) => {
-            if(type==="tag")  tog(fTags,setFTags,val);
-            else if(type==="note") tog(fNotes,setFNotes,val);
-            else if(type==="pair") tog(fPairs,setFPairs,val);
-            else if(type==="rr")   tog(fRR,setFRR,val);
-            else if(type==="sess") tog(fSess,setFSess,val);
+            if(type==="tag")        tog(fTags,setFTags,val);
+            else if(type==="note")  tog(fNotes,setFNotes,val);
+            else if(type==="pair")  tog(fPairs,setFPairs,val);
+            else if(type==="rr")    tog(fRR,setFRR,val);
+            else if(type==="sess")  tog(fSess,setFSess,val);
+            else if(type==="slNote")     tog(fSlNotes,setFSlNotes,val);
+            else if(type==="targetNote") tog(fTargetNotes,setFTargetNotes,val);
             setUSearch(""); setUSearchFocus(false);
           };
           const allSugg = uSuggestions.flatMap(g=>g.items);
@@ -3903,7 +4770,7 @@ function Stats({ trades, onExportReady, onShowPDF }) {
               <div style={{...LBL,display:"block",marginBottom:6,color:C.faint,fontSize:9,letterSpacing:1.5}}>
                 🔍 CARI CEPAT
                 <span style={{fontWeight:400,fontSize:9,marginLeft:8,letterSpacing:0,color:C.faint+"99"}}>
-                  ketik pair, kondisi, keterangan, RR, sesi…
+                  ketik pair, kondisi, keterangan, SL, target, RR, sesi…
                 </span>
               </div>
               <div style={{
@@ -3978,7 +4845,9 @@ function Stats({ trades, onExportReady, onShowPDF }) {
                           ||(item.type==="note"&&fNotes.includes(item.val))
                           ||(item.type==="pair"&&fPairs.includes(item.val))
                           ||(item.type==="rr"&&fRR.includes(item.val))
-                          ||(item.type==="sess"&&fSess.includes(item.val));
+                          ||(item.type==="sess"&&fSess.includes(item.val))
+                          ||(item.type==="slNote"&&fSlNotes.includes(item.val))
+                          ||(item.type==="targetNote"&&fTargetNotes.includes(item.val));
                         return (
                           <button key={ii} onClick={()=>dispatchSuggestion(item)}
                             style={{display:"flex",alignItems:"center",gap:10,width:"100%",
@@ -5950,7 +6819,22 @@ function App() {
           });
           if (m.expectancy != null)
             extraItems.push({ l: "EXPECTANCY", v: fmtPips(m.expectancy), col: m.expectancy >= 0 ? [22,163,74] : [220,38,38] });
+          if (m.avgWinPips != null)
+            extraItems.push({ l: "AVG WIN PIPS", v: fmtPips(m.avgWinPips), col: [22,163,74] });
+          if (m.avgLossPips != null)
+            extraItems.push({ l: "AVG LOSS PIPS", v: fmtPips(-m.avgLossPips), col: [220,38,38] });
         }
+        // Target range & SL stats from results
+        const trs = exportData?.results?.targetRangeStats;
+        if (trs) {
+          if (trs.avgTargetRange != null)
+            extraItems.push({ l: "AVG TARGET", v: "1:" + trs.avgTargetRange.toFixed(1), col: [202,138,4] });
+          if (trs.avgSlPips != null)
+            extraItems.push({ l: "AVG SL PIPS", v: Math.round(trs.avgSlPips)+"p", col: [180,60,60] });
+        }
+        const hrs = exportData?.results?.hitRangeStats;
+        if (hrs && hrs.total > 0)
+          extraItems.push({ l: "HIT MAX TP", v: hrs.hit+"/"+hrs.total+" ("+hrs.pct+"%)", col: hrs.pct>=60?[22,163,74]:hrs.pct>=40?[202,138,4]:[220,38,38] });
       }
 
       const allStats = [...statItems, ...extraItems];
@@ -5973,23 +6857,40 @@ function App() {
       });
 
       // ── Table ─────────────────────────────────────────────────────
-      const headers = [["Tanggal","Pair","Arah","SL","RR","Outcome","Model","Sesi Entry","Sesi Exit","Tags","Notes"]];
+      const headers = [["Tanggal","Pair","Arah","SL Type","SL Pips","RR","Target","Pips","Outcome","Model","Sesi Entry","Tags","Notes"]];
       const body    = pts.map(p => {
         const outcomeLabel = p.outcomeType === "bep"
           ? (p.bep ? "BEP " + p.bep : "BEP")
           : (p.outcomeType || "-");
+        const slPipsVal = p.slPips ? String(p.slPips)+"p" : "-";
+        const tgtVal    = p.targetRange || "-";
+        // Pips result: win = +RR*SL, loss = -SL, bep = bepPips or 0
+        let pipsVal = "-";
+        const sl = parseFloat(p.slPips||"");
+        const ratio = parseFloat(p.rr?.split(":")[1]||"");
+        if (p.outcomeType==="win" && sl>0 && ratio>0) pipsVal = "+" + Math.round(ratio*sl) + "p";
+        else if (p.outcomeType==="loss" && sl>0) pipsVal = "-" + Math.round(sl) + "p";
+        else if (p.outcomeType==="bep" && p.bepPips!=null) pipsVal = (p.bepPips>=0?"+":"") + Math.round(p.bepPips) + "p";
+        // Notes: use notesArr if available (same format as rekap display), else notes field
+        const notesForPdf = Array.isArray(p.notesArr)&&p.notesArr.length>0
+          ? p.notesArr.join(" + ")
+          : (p.notes||"");
+        // Tags: join with ", "
+        const tagsForPdf = (p.tags||[]).join(", ") || "-";
         return [
           p.tradeDate  || "-",
           p.pair       || "-",
           p.direction  || "-",
           p.slType     || "-",
+          slPipsVal,
           p.rr         || "-",
+          tgtVal,
+          pipsVal,
           outcomeLabel,
           p.trailingModel || p.slType || "-",
           (p.sessEntry || []).join(", ") || "-",
-          (p.sessExit  || []).join(", ") || "-",
-          (p.tags      || []).join(", ") || "-",
-          p.notes || "",
+          tagsForPdf,
+          notesForPdf,
         ];
       });
 
@@ -5997,11 +6898,11 @@ function App() {
         head: headers,
         body: body,
         startY: bY + 17,
-        margin: { left: 10, right: 10 },
+        margin: { left: 8, right: 8 },
         styles: {
           font:        "courier",
-          fontSize:    7.5,
-          cellPadding: 2.2,
+          fontSize:    7,
+          cellPadding: 1.8,
           lineColor:   [220, 220, 220],
           lineWidth:   0.2,
           textColor:   [30, 30, 30],
@@ -6011,36 +6912,47 @@ function App() {
           fillColor:  [21, 101, 192],
           textColor:  [255, 255, 255],
           fontStyle:  "bold",
-          fontSize:   7,
+          fontSize:   6.5,
         },
         alternateRowStyles: { fillColor: [245, 247, 250] },
         columnStyles: {
-          0:  { cellWidth: 22 },
-          1:  { cellWidth: 18, fontStyle: "bold" },
-          2:  { cellWidth: 14 },
-          3:  { cellWidth: 18 },
-          4:  { cellWidth: 14, fontStyle: "bold" },
-          5:  { cellWidth: 18, fontStyle: "bold" },
-          6:  { cellWidth: 20 },
-          7:  { cellWidth: 24 },
-          8:  { cellWidth: 24 },
-          9:  { cellWidth: 30 },
-          10: { cellWidth: "auto" },
+          0:  { cellWidth: 20 },   // Tanggal
+          1:  { cellWidth: 16, fontStyle: "bold" }, // Pair
+          2:  { cellWidth: 12 },   // Arah
+          3:  { cellWidth: 14 },   // SL Type
+          4:  { cellWidth: 13 },   // SL Pips
+          5:  { cellWidth: 12, fontStyle: "bold" }, // RR
+          6:  { cellWidth: 13 },   // Target
+          7:  { cellWidth: 14, fontStyle: "bold" }, // Pips
+          8:  { cellWidth: 15, fontStyle: "bold" }, // Outcome
+          9:  { cellWidth: 16 },   // Model
+          10: { cellWidth: 20 },   // Sesi Entry
+          11: { cellWidth: 24 },   // Tags
+          12: { cellWidth: "auto" }, // Notes
         },
         didDrawCell(data) {
           if (data.section !== "body") return;
-          // Direction cell — Buy=green, Sell=red
+          // Direction cell (col 2) — Buy=green, Sell=red
           if (data.column.index === 2) {
             const dir = pts[data.row.index]?.direction;
             doc.setTextColor(...(dir === "Buy" ? [22,163,74] : [220,38,38]));
           }
-          // Outcome cell
-          if (data.column.index === 5) {
+          // Outcome cell (col 8)
+          if (data.column.index === 8) {
             const ot = pts[data.row.index]?.outcomeType;
             doc.setTextColor(...(ot === "win" ? [22,163,74] : ot === "loss" ? [220,38,38] : [202,138,4]));
           }
-          // RR cell — yellow
-          if (data.column.index === 4) doc.setTextColor(202, 138, 4);
+          // RR cell (col 5) — yellow
+          if (data.column.index === 5) doc.setTextColor(202, 138, 4);
+          // Target Range cell (col 6) — yellow-ish
+          if (data.column.index === 6 && pts[data.row.index]?.targetRange) doc.setTextColor(180, 120, 0);
+          // Pips result cell (col 7) — green/red
+          if (data.column.index === 7) {
+            const ot = pts[data.row.index]?.outcomeType;
+            doc.setTextColor(...(ot === "win" ? [22,163,74] : ot === "loss" ? [220,38,38] : [202,138,4]));
+          }
+          // SL Pips cell (col 4) — subtle red
+          if (data.column.index === 4) doc.setTextColor(180, 60, 60);
         },
         didDrawPage() {
           const pg = doc.internal.getCurrentPageInfo().pageNumber;
@@ -6053,6 +6965,345 @@ function App() {
           );
         },
       });
+
+      // ══════════════════════════════════════════════════════════════
+      // HALAMAN ANALITIK — ditambahkan setelah tabel trade
+      // ══════════════════════════════════════════════════════════════
+      const res = exportData?.results;
+      const fmtP = v => v == null ? "-" : (v >= 0 ? "+" : "") + Math.round(v) + "p";
+
+      // ── Helper: draw section header bar ──
+      const drawSecHeader = (text, y, rgb) => {
+        doc.setFillColor(...rgb);
+        doc.rect(0, y, PW, 8, "F");
+        doc.setTextColor(255, 255, 255);
+        doc.setFont("courier", "bold");
+        doc.setFontSize(8);
+        doc.text(text, 10, y + 5.5);
+        return y + 11;
+      };
+
+      // ── Helper: new page with footer ──
+      const newAnalyticsPage = () => {
+        doc.addPage();
+        const pg = doc.internal.getCurrentPageInfo().pageNumber;
+        doc.setFontSize(7);
+        doc.setTextColor(150, 150, 150);
+        doc.setFont("courier", "normal");
+        doc.text("MIRANA EDGE  \xb7  " + today + "  \xb7  Hal " + pg, PW / 2, PH - 4, { align: "center" });
+        return 14;
+      };
+
+      // ══ PAGE 2: RINCIAN PIPS PER RR ══════════════════════════════
+      if (res?.perRRRows?.length > 0 && res?.perExecRRSummaryMap) {
+        let y = newAnalyticsPage();
+        y = drawSecHeader("RINCIAN PIPS PER RR  \xb7  RINGKASAN PER EKSEKUSI", y - 11, [21, 101, 192]);
+
+        // Group perRRRows by execId
+        const execGroups = {};
+        res.perRRRows.forEach(r => {
+          execGroups[r.execId] = execGroups[r.execId] || [];
+          execGroups[r.execId].push(r);
+        });
+
+        for (const [execId, rows] of Object.entries(execGroups)) {
+          // Exec label
+          doc.setFont("courier", "bold");
+          doc.setFontSize(8);
+          doc.setTextColor(100, 160, 255);
+          const execLabel = rows[0]?.execLabel || execId;
+          doc.text(execLabel, 10, y);
+          y += 5;
+
+          // Build per-RR table data
+          const byRR = {};
+          rows.forEach(r => { const k = r.rr || "(global)"; byRR[k] = byRR[k] || []; byRR[k].push(r); });
+          const rrKeys = Object.keys(byRR).sort((a, b) => {
+            const na = parseFloat(a.split(":")[1] || "0");
+            const nb = parseFloat(b.split(":")[1] || "0");
+            return na - nb;
+          });
+
+          const rrTableHead = [["RR", "Outcome", "Avg Pips", "Total Pips", "Count", "SL Type"]];
+          const rrTableBody = [];
+          rrKeys.forEach(rr => {
+            byRR[rr].forEach(r => {
+              const icon = r.outcomeType === "win" ? "WIN" : r.outcomeType === "loss" ? "LOSS" : "BEP";
+              const total = r.outcomeType === "loss" ? -Math.abs(r.pipsSum) : r.pipsSum;
+              rrTableBody.push([rr, icon, fmtP(r.avgPips), fmtP(total), String(r.count), r.slType || "-"]);
+            });
+          });
+
+          doc.autoTable({
+            head: rrTableHead, body: rrTableBody,
+            startY: y, margin: { left: 12, right: 12 },
+            styles: { font: "courier", fontSize: 7, cellPadding: 1.5, lineColor: [200,200,200], lineWidth: 0.2, textColor: [30,30,30] },
+            headStyles: { fillColor: [30, 60, 120], textColor: [255,255,255], fontStyle: "bold", fontSize: 6.5 },
+            alternateRowStyles: { fillColor: [245,247,250] },
+            columnStyles: { 0:{cellWidth:18}, 1:{cellWidth:18}, 2:{cellWidth:22,fontStyle:"bold"}, 3:{cellWidth:22,fontStyle:"bold"}, 4:{cellWidth:14}, 5:{cellWidth:"auto"} },
+            didDrawCell(data) {
+              if (data.section !== "body") return;
+              const ot = rrTableBody[data.row.index]?.[1];
+              if (data.column.index === 1) doc.setTextColor(...(ot==="WIN"?[22,163,74]:ot==="LOSS"?[220,38,38]:[202,138,4]));
+              if (data.column.index === 2 || data.column.index === 3) doc.setTextColor(...(ot==="WIN"?[22,163,74]:ot==="LOSS"?[220,38,38]:[202,138,4]));
+              if (data.column.index === 0) doc.setTextColor(202,138,4);
+            },
+          });
+          y = doc.lastAutoTable.finalY + 4;
+
+          // Ringkasan box for this exec
+          const S = res.perExecRRSummaryMap[execId] || {};
+          if (S.winCnt > 0 || S.lossCnt > 0) {
+            const avgW = S.winCnt  > 0 ? S.grossWin  / S.winCnt  : null;
+            const avgL = S.lossCnt > 0 ? S.grossLoss / S.lossCnt : null;
+            const net  = (S.grossWin || 0) + (S.bepSum || 0) - (S.grossLoss || 0);
+            const conv = (avgW != null && avgL != null) ? avgW - avgL : null;
+
+            doc.setFillColor(240, 244, 255);
+            doc.setDrawColor(180, 200, 240);
+            doc.roundedRect(12, y, PW - 24, 14, 1.5, 1.5, "FD");
+            doc.setFont("courier", "normal");
+            doc.setFontSize(7);
+            let bx = 16;
+            const summCols = [
+              ["GROSS WIN",  S.grossWin>0  ? fmtP(S.grossWin)  : "-", [22,163,74]],
+              ["GROSS LOSS", S.grossLoss>0 ? fmtP(-S.grossLoss): "-", [220,38,38]],
+              ["AVG/TRADE",  conv != null  ? fmtP(conv)        : "-", conv!=null&&conv>=0?[22,163,74]:[220,38,38]],
+              ["NET TOTAL",  fmtP(net),                               net>=0?[22,163,74]:[220,38,38]],
+            ];
+            summCols.forEach(([l, v, col]) => {
+              doc.setTextColor(...col); doc.setFont("courier","bold"); doc.setFontSize(8);
+              doc.text(v, bx, y + 7);
+              doc.setTextColor(100,100,100); doc.setFont("courier","normal"); doc.setFontSize(6);
+              doc.text(l, bx, y + 12);
+              bx += (PW - 28) / summCols.length;
+            });
+            y += 18;
+          }
+
+          // Net per RR chips (inline text row)
+          const rrNetMap = {};
+          rows.forEach(r => {
+            const k = r.rr || "(global)";
+            if (!rrNetMap[k]) rrNetMap[k] = { win: 0, loss: 0 };
+            if (r.outcomeType === "win")  rrNetMap[k].win  += r.pipsSum;
+            else if (r.outcomeType === "loss") rrNetMap[k].loss += Math.abs(r.pipsSum);
+          });
+          const netChips = Object.entries(rrNetMap)
+            .sort((a,b) => parseFloat(a[0].split(":")[1]||0) - parseFloat(b[0].split(":")[1]||0))
+            .map(([rr, v]) => ({ rr, net: v.win - v.loss }))
+            .filter(c => c.net !== 0);
+
+          if (netChips.length > 0) {
+            doc.setFont("courier","bold"); doc.setFontSize(6.5); doc.setTextColor(100,100,100);
+            doc.text("NET PER RR:", 12, y);
+            let cx = 36;
+            netChips.forEach(c => {
+              doc.setTextColor(...(c.net>=0?[22,163,74]:[220,38,38]));
+              doc.text(`${c.rr}: ${fmtP(c.net)}`, cx, y);
+              cx += 28;
+            });
+            y += 6;
+          }
+
+          y += 2;
+          if (y > PH - 30) { y = newAnalyticsPage(); }
+        }
+      }
+
+      // ══ PAGE 3: HIT RATE PER RR ══════════════════════════════════
+      if (res?.rrRangeStatsList?.length > 0) {
+        let y = newAnalyticsPage();
+        y = drawSecHeader("HIT RATE PER RR  \xb7  BERDASARKAN TARGET RANGE", y - 11, [21, 101, 192]);
+
+        const hrHead = [["RR", "Valid Trade", "Hit", "Miss", "Hit Rate", "Avg Win Pips"]];
+        const hrBody = res.rrRangeStatsList.map(r => [
+          r.rr,
+          String(r.validTotal),
+          String(r.hitCount),
+          String(r.validTotal - r.hitCount),
+          r.hitPct + "%",
+          r.avgWinPips != null ? "+" + Math.round(r.avgWinPips) + "p" : "-",
+        ]);
+
+        doc.autoTable({
+          head: hrHead, body: hrBody,
+          startY: y, margin: { left: 10, right: 10 },
+          styles: { font: "courier", fontSize: 8, cellPadding: 2, lineColor: [200,200,200], lineWidth: 0.2, textColor: [30,30,30] },
+          headStyles: { fillColor: [21,101,192], textColor: [255,255,255], fontStyle: "bold", fontSize: 7.5 },
+          alternateRowStyles: { fillColor: [245,247,250] },
+          columnStyles: { 0:{cellWidth:22,fontStyle:"bold"}, 1:{cellWidth:28}, 2:{cellWidth:22}, 3:{cellWidth:22}, 4:{cellWidth:28,fontStyle:"bold"}, 5:{cellWidth:"auto",fontStyle:"bold"} },
+          didDrawCell(data) {
+            if (data.section !== "body") return;
+            const pct = parseInt(hrBody[data.row.index]?.[4]);
+            if (data.column.index === 0) doc.setTextColor(202,138,4);
+            if (data.column.index === 2) doc.setTextColor(22,163,74);
+            if (data.column.index === 3) doc.setTextColor(220,38,38);
+            if (data.column.index === 4) doc.setTextColor(...(pct>=60?[22,163,74]:pct>=40?[202,138,4]:[220,38,38]));
+            if (data.column.index === 5) doc.setTextColor(22,163,74);
+          },
+        });
+        y = doc.lastAutoTable.finalY + 12;
+
+        // ── WIN PIPS PER RR ──
+        if (res.winPipsPerRRList?.length > 0) {
+          y = drawSecHeader("DETAIL WIN PIPS PER RR", y - 12, [16, 120, 80]);
+
+          const wpHead = [["RR", "Pair", "Arah", "SL Pips", "Win Pips", "Target Range"]];
+          const wpBody = [];
+          res.winPipsPerRRList.forEach(row => {
+            row.entries.forEach(e => {
+              wpBody.push([
+                row.rr,
+                e.pair || "-",
+                e.direction || "-",
+                e.slPips ? e.slPips + "p" : "-",
+                "+" + Math.round(e.winPips) + "p",
+                e.targetRange != null ? "1:" + (e.targetRange % 1 === 0 ? e.targetRange : e.targetRange.toFixed(1)) : "-",
+              ]);
+            });
+          });
+
+          doc.autoTable({
+            head: wpHead, body: wpBody,
+            startY: y, margin: { left: 10, right: 10 },
+            styles: { font: "courier", fontSize: 7.5, cellPadding: 1.8, lineColor: [200,200,200], lineWidth: 0.2, textColor: [30,30,30] },
+            headStyles: { fillColor: [16,120,80], textColor: [255,255,255], fontStyle: "bold", fontSize: 7 },
+            alternateRowStyles: { fillColor: [240,250,245] },
+            columnStyles: { 0:{cellWidth:20,fontStyle:"bold"}, 1:{cellWidth:22,fontStyle:"bold"}, 2:{cellWidth:16}, 3:{cellWidth:20}, 4:{cellWidth:22,fontStyle:"bold"}, 5:{cellWidth:"auto"} },
+            didDrawCell(data) {
+              if (data.section !== "body") return;
+              if (data.column.index === 0) doc.setTextColor(202,138,4);
+              if (data.column.index === 4) doc.setTextColor(22,163,74);
+              const dir = wpBody[data.row.index]?.[2];
+              if (data.column.index === 2) doc.setTextColor(...(dir==="Buy"?[22,163,74]:[220,38,38]));
+              if (data.column.index === 3) doc.setTextColor(180,60,60);
+              if (data.column.index === 5) doc.setTextColor(180,120,0);
+            },
+          });
+          y = doc.lastAutoTable.finalY + 12;
+        }
+
+        // ── LOSS PIPS PER RR ──
+        if (res.lossPipsPerRRList?.length > 0) {
+          if (y > PH - 40) { y = newAnalyticsPage(); }
+          y = drawSecHeader("DETAIL LOSS PIPS PER RR", y - 12, [160, 30, 30]);
+
+          const lpHead = [["RR", "Pair", "Arah", "SL Pips", "Loss Pips", "Target Range"]];
+          const lpBody = [];
+          res.lossPipsPerRRList.forEach(row => {
+            row.entries.forEach(e => {
+              lpBody.push([
+                row.rr === "(global)" ? "LOSS" : row.rr,
+                e.pair || "-",
+                e.direction || "-",
+                e.slPips ? e.slPips + "p" : "-",
+                "-" + Math.round(e.lossPips) + "p",
+                e.targetRange != null ? "1:" + (e.targetRange % 1 === 0 ? e.targetRange : e.targetRange.toFixed(1)) : "-",
+              ]);
+            });
+          });
+
+          doc.autoTable({
+            head: lpHead, body: lpBody,
+            startY: y, margin: { left: 10, right: 10 },
+            styles: { font: "courier", fontSize: 7.5, cellPadding: 1.8, lineColor: [200,200,200], lineWidth: 0.2, textColor: [30,30,30] },
+            headStyles: { fillColor: [160,30,30], textColor: [255,255,255], fontStyle: "bold", fontSize: 7 },
+            alternateRowStyles: { fillColor: [250,240,240] },
+            columnStyles: { 0:{cellWidth:20,fontStyle:"bold"}, 1:{cellWidth:22,fontStyle:"bold"}, 2:{cellWidth:16}, 3:{cellWidth:20}, 4:{cellWidth:22,fontStyle:"bold"}, 5:{cellWidth:"auto"} },
+            didDrawCell(data) {
+              if (data.section !== "body") return;
+              if (data.column.index === 0) doc.setTextColor(202,138,4);
+              if (data.column.index === 4) doc.setTextColor(220,38,38);
+              const dir = lpBody[data.row.index]?.[2];
+              if (data.column.index === 2) doc.setTextColor(...(dir==="Buy"?[22,163,74]:[220,38,38]));
+              if (data.column.index === 3) doc.setTextColor(180,60,60);
+              if (data.column.index === 5) doc.setTextColor(180,120,0);
+            },
+          });
+        }
+      }
+
+      // ══ PAGE 4: TARGET RANGE + HIT MAX TP ════════════════════════
+      const trs = exportData?.results?.targetRangeStats;
+      const hrs = exportData?.results?.hitRangeStats;
+      if ((trs && trs.execCount > 0) || (hrs && hrs.total > 0)) {
+        let y = newAnalyticsPage();
+        y = drawSecHeader("STATISTIK TARGET RANGE  \xb7  HIT MAX TP", y - 11, [140, 100, 10]);
+
+        // Summary chips
+        const trSumm = [];
+        if (trs?.avgTargetRange != null) trSumm.push(["AVG TARGET RANGE", "1:"+trs.avgTargetRange.toFixed(1), [202,138,4]]);
+        if (trs?.avgSlPips     != null) trSumm.push(["AVG SL PIPS",      Math.round(trs.avgSlPips)+"p",      [180,60,60]]);
+        if (trs?.minSlPips     != null) trSumm.push(["SL TERKECIL",      trs.minSlPips+"p",                  [22,163,74]]);
+        if (trs?.maxSlPips     != null) trSumm.push(["SL TERBESAR",      trs.maxSlPips+"p",                  [220,38,38]]);
+        if (hrs?.total         >  0)    trSumm.push(["HIT MAX TP",       hrs.hit+"/"+hrs.total+" ("+hrs.pct+"%)", hrs.pct>=60?[22,163,74]:hrs.pct>=40?[202,138,4]:[220,38,38]]);
+
+        let bx = 10;
+        const chipW = Math.min(50, (PW - 20) / trSumm.length);
+        trSumm.forEach(([l,v,col]) => {
+          doc.setDrawColor(200,200,200); doc.setFillColor(248,249,250);
+          doc.roundedRect(bx, y, chipW - 2, 13, 1.5, 1.5, "FD");
+          doc.setTextColor(...col); doc.setFont("courier","bold"); doc.setFontSize(9);
+          doc.text(v, bx + (chipW-2)/2, y + 6.5, {align:"center"});
+          doc.setTextColor(100,100,100); doc.setFont("courier","normal"); doc.setFontSize(6);
+          doc.text(l, bx + (chipW-2)/2, y + 11, {align:"center"});
+          bx += chipW;
+        });
+        y += 18;
+
+        // Target range per execution
+        if (trs?.targetRangeData?.length > 0) {
+          doc.setFont("courier","bold"); doc.setFontSize(7); doc.setTextColor(100,100,100);
+          doc.text("DETAIL TARGET RANGE PER EKSEKUSI:", 10, y); y += 5;
+          const trHead = [["Target Range","SL Pips"]];
+          const trBody = trs.targetRangeData.map(d => [
+            "1:"+(d.targetRatioNum%1===0?String(d.targetRatioNum):d.targetRatioNum.toFixed(1)),
+            d.slPipsNum+"p",
+          ]);
+          doc.autoTable({
+            head: trHead, body: trBody,
+            startY: y, margin: {left:10,right:PW/2},
+            styles: {font:"courier",fontSize:7.5,cellPadding:1.8,lineColor:[200,200,200],lineWidth:0.2,textColor:[30,30,30]},
+            headStyles: {fillColor:[140,100,10],textColor:[255,255,255],fontStyle:"bold",fontSize:7},
+            columnStyles: {0:{cellWidth:30,fontStyle:"bold"},1:{cellWidth:22}},
+            didDrawCell(data){ if(data.column.index===0&&data.section==="body") doc.setTextColor(202,138,4); if(data.column.index===1&&data.section==="body") doc.setTextColor(180,60,60); }
+          });
+          y = doc.lastAutoTable.finalY + 8;
+        }
+
+        // Hit / miss list
+        if (hrs?.total > 0) {
+          doc.setFont("courier","bold"); doc.setFontSize(7.5); doc.setTextColor(22,163,74);
+          doc.text("TRADE YANG HIT MAX TP ("+hrs.hit+"):", 10, y); y += 5;
+          if (hrs.hitList.length > 0) {
+            const hmHead = [["Pair","Arah","Target Range","Max RR Hit"]];
+            const hmBody = hrs.hitList.map(e => [e.pair||"-", e.direction||"-", "1:"+(e.targetRatio%1===0?e.targetRatio:e.targetRatio.toFixed(1)), "1:"+(e.maxWinRatio%1===0?e.maxWinRatio:e.maxWinRatio.toFixed(1))]);
+            doc.autoTable({
+              head:hmHead, body:hmBody, startY:y, margin:{left:10,right:10},
+              styles:{font:"courier",fontSize:7.5,cellPadding:1.8,lineColor:[200,200,200],lineWidth:0.2,textColor:[30,30,30]},
+              headStyles:{fillColor:[16,100,60],textColor:[255,255,255],fontStyle:"bold",fontSize:7},
+              columnStyles:{0:{cellWidth:24,fontStyle:"bold"},1:{cellWidth:20},2:{cellWidth:28},3:{cellWidth:"auto",fontStyle:"bold"}},
+              didDrawCell(data){ if(data.section!=="body")return; const dir=hmBody[data.row.index]?.[1]; if(data.column.index===1)doc.setTextColor(...(dir==="Buy"?[22,163,74]:[220,38,38])); if(data.column.index===2||data.column.index===3)doc.setTextColor(22,163,74); }
+            });
+            y = doc.lastAutoTable.finalY + 6;
+          }
+
+          if (hrs.missList.length > 0) {
+            doc.setFont("courier","bold"); doc.setFontSize(7.5); doc.setTextColor(220,38,38);
+            doc.text("TRADE YANG TIDAK HIT MAX TP ("+hrs.missList.length+"):", 10, y); y += 5;
+            const mmHead = [["Pair","Arah","Target Range","Max RR Tercapai"]];
+            const mmBody = hrs.missList.map(e => [e.pair||"-",e.direction||"-","1:"+(e.targetRatio%1===0?e.targetRatio:e.targetRatio.toFixed(1)),e.maxWinRatio>0?"1:"+(e.maxWinRatio%1===0?e.maxWinRatio:e.maxWinRatio.toFixed(1)):"—"]);
+            doc.autoTable({
+              head:mmHead, body:mmBody, startY:y, margin:{left:10,right:10},
+              styles:{font:"courier",fontSize:7.5,cellPadding:1.8,lineColor:[200,200,200],lineWidth:0.2,textColor:[30,30,30]},
+              headStyles:{fillColor:[140,20,20],textColor:[255,255,255],fontStyle:"bold",fontSize:7},
+              columnStyles:{0:{cellWidth:24,fontStyle:"bold"},1:{cellWidth:20},2:{cellWidth:28},3:{cellWidth:"auto"}},
+              didDrawCell(data){ if(data.section!=="body")return; const dir=mmBody[data.row.index]?.[1]; if(data.column.index===1)doc.setTextColor(...(dir==="Buy"?[22,163,74]:[220,38,38])); if(data.column.index===2)doc.setTextColor(202,138,4); if(data.column.index===3)doc.setTextColor(220,38,38); }
+            });
+          }
+        }
+      }
 
       doc.save("mirana-rekap-" + fileDate + ".pdf");
     } catch (err) {
@@ -6129,7 +7380,7 @@ function App() {
               />
             : tab==="calc"
               ? <PipCalculator/>
-              : <Stats trades={trades} onExportReady={data=>setExportData(data||{points:[],metrics:null})} onShowPDF={()=>setShowPDF(true)}/>
+              : <Stats trades={trades} activeTagPresets={activeTagPresets} archives={archives} onExportReady={data=>setExportData(data||{points:[],metrics:null,results:null})} onShowPDF={()=>setShowPDF(true)}/>
         }
       </div>
 
@@ -6284,14 +7535,38 @@ function App() {
                     </div>
                   )}
 
+                  {/* ── STAT BOXES ROW 3: target range + SL + hit max TP ── */}
+                  {(()=>{
+                    const trs = exportData?.results?.targetRangeStats;
+                    const hrs = exportData?.results?.hitRangeStats;
+                    const items = [];
+                    if (trs?.avgTargetRange!=null) items.push(["AVG TARGET","1:"+trs.avgTargetRange.toFixed(1),C.yellow]);
+                    if (trs?.avgSlPips!=null)       items.push(["AVG SL",Math.round(trs.avgSlPips)+"p",[180,60,60]]);
+                    if (hrs?.total>0)               items.push(["HIT MAX TP",hrs.hit+"/"+hrs.total+" ("+hrs.pct+"%)",hrs.pct>=60?C.green:hrs.pct>=40?C.yellow:C.red]);
+                    if (m?.avgWinPips!=null)         items.push(["AVG WIN PIPS",fmtPips(m.avgWinPips),C.green]);
+                    if (m?.avgLossPips!=null)        items.push(["AVG LOSS PIPS",fmtPips(-m.avgLossPips),C.red]);
+                    if (!items.length) return null;
+                    return (
+                      <div style={{display:"flex",gap:6,marginBottom:8,flexWrap:"wrap"}}>
+                        {items.map(([l,v,col],i)=>(
+                          <div key={i} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:7,
+                            padding:"6px 10px",flex:1,textAlign:"center",minWidth:70}}>
+                            <div style={{color:Array.isArray(col)?`rgb(${col.join(",")})`:col,fontWeight:800,fontSize:12,fontFamily:"monospace"}}>{v}</div>
+                            <div style={{color:C.faint,fontSize:9,letterSpacing:1}}>{l}</div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+
                   {/* ── TABLE ── */}
                   <div style={{overflowX:"auto",marginBottom:12}}>
-                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:9.5,minWidth:560}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:9,minWidth:700}}>
                       <thead>
                         <tr style={{background:"#1565c0"}}>
-                          {["Tanggal","Pair","Arah","SL","RR","Outcome","Model","Sesi Entry","Sesi Exit","Tags","Notes"]
+                          {["Tanggal","Pair","Arah","SL Type","SL Pips","RR","Target","Pips","Outcome","Model","Sesi Entry","Tags","Notes"]
                             .map(h=>(
-                            <th key={h} style={{color:"#fff",padding:"5px 5px",textAlign:"left",fontSize:8.5,whiteSpace:"nowrap"}}>{h}</th>
+                            <th key={h} style={{color:"#fff",padding:"4px 5px",textAlign:"left",fontSize:8,whiteSpace:"nowrap"}}>{h}</th>
                           ))}
                         </tr>
                       </thead>
@@ -6300,25 +7575,297 @@ function App() {
                           const bg = i%2===0?"#0d1117":"#0f1520";
                           const outcomeColor = p.outcomeType==="win"?C.green:p.outcomeType==="loss"?C.red:C.yellow;
                           const outcomeLabel = p.outcomeType==="bep"?(p.bep?`BEP ${p.bep}`:"BEP"):p.outcomeType||"-";
+                          const slPipsVal = p.slPips ? p.slPips+"p" : "-";
+                          const tgtVal    = p.targetRange || "-";
+                          const sl  = parseFloat(p.slPips||"");
+                          const ratio = parseFloat(p.rr?.split(":")[1]||"");
+                          let pipsVal="-", pipsColor=C.dim;
+                          if (p.outcomeType==="win"&&sl>0&&ratio>0){ pipsVal="+"+Math.round(ratio*sl)+"p"; pipsColor=C.green; }
+                          else if(p.outcomeType==="loss"&&sl>0){ pipsVal="-"+Math.round(sl)+"p"; pipsColor=C.red; }
+                          else if(p.outcomeType==="bep"&&p.bepPips!=null){ pipsVal=(p.bepPips>=0?"+":"")+Math.round(p.bepPips)+"p"; pipsColor=C.yellow; }
+                          // Notes: use notesArr joined with " + " if available, else notes field
+                          const notesDisplay = Array.isArray(p.notesArr)&&p.notesArr.length>0
+                            ? p.notesArr.join(" + ")
+                            : (p.notes||"");
+                          // Tags: join with comma+space
+                          const tagsDisplay = (p.tags||[]).join(", ") || "-";
                           return (
                             <tr key={i} style={{background:bg}}>
-                              <td style={{padding:"4px 5px",color:C.dim,whiteSpace:"nowrap",fontSize:9}}>{p.tradeDate||"-"}</td>
-                              <td style={{padding:"4px 5px",fontWeight:700,color:C.text,fontSize:10}}>{p.pair||"-"}</td>
-                              <td style={{padding:"4px 5px",color:p.direction==="Buy"?C.green:C.red,fontWeight:700,fontSize:9}}>{p.direction||"-"}</td>
-                              <td style={{padding:"4px 5px",color:C.dim,fontSize:9}}>{p.slType||"-"}</td>
-                              <td style={{padding:"4px 5px",color:C.yellow,fontWeight:700,fontSize:10}}>{p.rr||"-"}</td>
-                              <td style={{padding:"4px 5px",color:outcomeColor,fontWeight:700,fontSize:9}}>{outcomeLabel}</td>
-                              <td style={{padding:"4px 5px",color:C.purple,fontSize:9}}>{p.trailingModel||p.slType||"-"}</td>
-                              <td style={{padding:"4px 5px",fontSize:9,color:C.blue}}>{(p.sessEntry||[]).join(", ")||"-"}</td>
-                              <td style={{padding:"4px 5px",fontSize:9,color:C.dim}}>{(p.sessExit||[]).join(", ")||"-"}</td>
-                              <td style={{padding:"4px 5px",fontSize:9,color:"#a78bfa"}}>{(p.tags||[]).join(", ")||"-"}</td>
-                              <td style={{padding:"4px 5px",fontSize:9,color:C.dim,maxWidth:80}}>{p.notes||""}</td>
+                              <td style={{padding:"3px 5px",color:C.dim,whiteSpace:"nowrap",fontSize:8.5}}>{p.tradeDate||"-"}</td>
+                              <td style={{padding:"3px 5px",fontWeight:700,color:C.text,fontSize:9,whiteSpace:"nowrap"}}>{p.pair||"-"}</td>
+                              <td style={{padding:"3px 5px",color:p.direction==="Buy"?C.green:C.red,fontWeight:700,fontSize:9}}>{p.direction||"-"}</td>
+                              <td style={{padding:"3px 5px",color:C.dim,fontSize:8.5}}>{p.slType||"-"}</td>
+                              <td style={{padding:"3px 5px",color:"#b44040",fontWeight:700,fontSize:9}}>{slPipsVal}</td>
+                              <td style={{padding:"3px 5px",color:C.yellow,fontWeight:700,fontSize:9,whiteSpace:"nowrap"}}>{p.rr||"-"}</td>
+                              <td style={{padding:"3px 5px",color:"#b48800",fontSize:8.5,whiteSpace:"nowrap"}}>{tgtVal}</td>
+                              <td style={{padding:"3px 5px",color:pipsColor,fontWeight:700,fontSize:9,whiteSpace:"nowrap"}}>{pipsVal}</td>
+                              <td style={{padding:"3px 5px",color:outcomeColor,fontWeight:700,fontSize:9}}>{outcomeLabel}</td>
+                              <td style={{padding:"3px 5px",color:C.purple,fontSize:8.5}}>{p.trailingModel||p.slType||"-"}</td>
+                              <td style={{padding:"3px 5px",fontSize:8.5,color:C.blue,whiteSpace:"nowrap"}}>{(p.sessEntry||[]).join(", ")||"-"}</td>
+                              <td style={{padding:"3px 5px",fontSize:8.5,color:"#a78bfa",maxWidth:100}}>{tagsDisplay}</td>
+                              <td style={{padding:"3px 5px",fontSize:8.5,color:C.dim,maxWidth:120}}>{notesDisplay}</td>
                             </tr>
                           );
                         })}
                       </tbody>
                     </table>
                   </div>
+
+                  {/* ══ ANALITIK PREVIEW ══ */}
+                  {(()=>{
+                    const res = exportData?.results;
+                    if (!res) return null;
+                    const fmtP = v => v==null?"-":(v>=0?"+":"")+Math.round(v)+"p";
+                    const sectionStyle = {background:"#060a10",border:`1px solid ${C.border}`,borderRadius:8,overflow:"hidden",marginBottom:10};
+                    const secHdr = (txt,col) => (
+                      <div style={{background:"#0a0f1a",padding:"5px 12px",fontSize:9,color:col,fontWeight:800,letterSpacing:1.2}}>{txt}</div>
+                    );
+                    return (
+                      <div>
+                        {/* RINCIAN PIPS PER RR */}
+                        {res.perRRRows?.length > 0 && res.perExecRRSummaryMap && (()=>{
+                          const execGroups = {};
+                          res.perRRRows.forEach(r=>{ execGroups[r.execId]=execGroups[r.execId]||[]; execGroups[r.execId].push(r); });
+                          return (
+                            <div style={sectionStyle}>
+                              {secHdr("📊 RINCIAN PIPS PER RR","#64b5f6")}
+                              <div style={{padding:"8px 12px",display:"flex",flexDirection:"column",gap:6}}>
+                                {Object.entries(execGroups).map(([eid,rows])=>{
+                                  const S = res.perExecRRSummaryMap[eid]||{};
+                                  const avgW = S.winCnt>0?S.grossWin/S.winCnt:null;
+                                  const avgL = S.lossCnt>0?S.grossLoss/S.lossCnt:null;
+                                  const net  = (S.grossWin||0)+(S.bepSum||0)-(S.grossLoss||0);
+                                  const conv = (avgW!=null&&avgL!=null)?avgW-avgL:null;
+                                  const byRR = {};
+                                  rows.forEach(r=>{ const k=r.rr||"(global)"; byRR[k]=byRR[k]||[]; byRR[k].push(r); });
+                                  const rrKeys = Object.keys(byRR).sort((a,b)=>parseFloat(a.split(":")[1]||0)-parseFloat(b.split(":")[1]||0));
+                                  // net per rr
+                                  const rrNetMap={};
+                                  rows.forEach(r=>{ const k=r.rr||"(global)"; if(!rrNetMap[k])rrNetMap[k]={w:0,l:0}; if(r.outcomeType==="win")rrNetMap[k].w+=r.pipsSum; else if(r.outcomeType==="loss")rrNetMap[k].l+=Math.abs(r.pipsSum); });
+                                  return (
+                                    <div key={eid}>
+                                      <div style={{color:C.blue,fontSize:10,fontWeight:800,marginBottom:4}}>{rows[0]?.execLabel||eid}</div>
+                                      {rrKeys.map(rr=>(
+                                        <div key={rr} style={{display:"flex",alignItems:"center",gap:5,marginLeft:6,marginBottom:3,borderBottom:`1px solid ${C.faint}18`,paddingBottom:3}}>
+                                          <span style={{color:C.yellow,fontSize:9,fontFamily:"monospace",minWidth:34}}>{rr}</span>
+                                          <div style={{display:"flex",flexWrap:"wrap",gap:3}}>
+                                            {byRR[rr].map((r,ri)=>{
+                                              const col=r.outcomeType==="win"?C.green:r.outcomeType==="loss"?C.red:C.yellow;
+                                              const icon=r.outcomeType==="win"?"✓":r.outcomeType==="loss"?"✗":"~";
+                                              const total=r.outcomeType==="loss"?-Math.abs(r.pipsSum):r.pipsSum;
+                                              return (
+                                                <div key={ri} style={{background:col+"12",border:`1px solid ${col}25`,borderRadius:5,padding:"2px 7px"}}>
+                                                  <span style={{color:col,fontWeight:800,fontSize:9,fontFamily:"monospace"}}>{icon} avg {fmtPips(r.avgPips)}</span>
+                                                  {r.count>1&&<span style={{color:col+"66",fontSize:8,marginLeft:3}}>×{r.count}</span>}
+                                                  <span style={{color:col+"aa",fontSize:8,marginLeft:5,fontFamily:"monospace"}}>total {fmtPips(total)}</span>
+                                                </div>
+                                              );
+                                            })}
+                                          </div>
+                                        </div>
+                                      ))}
+                                      {/* Ringkasan */}
+                                      {(S.winCnt>0||S.lossCnt>0)&&(
+                                        <div style={{background:"#0a0f1c",border:`1px solid ${C.border}`,borderRadius:6,padding:"6px 10px",marginLeft:6,marginTop:4,display:"flex",flexDirection:"column",gap:4}}>
+                                          <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                                            {S.grossWin>0&&<div style={{background:C.green+"10",border:`1px solid ${C.green}22`,borderRadius:5,padding:"3px 8px",flex:1,minWidth:60}}>
+                                              <div style={{color:C.faint,fontSize:7,letterSpacing:0.8}}>GROSS WIN</div>
+                                              <div style={{color:C.green,fontWeight:900,fontSize:11,fontFamily:"monospace"}}>{fmtPips(S.grossWin)}</div>
+                                              {avgW!=null&&<div style={{color:C.green+"77",fontSize:7.5,fontFamily:"monospace"}}>avg {fmtPips(avgW)}/trade</div>}
+                                            </div>}
+                                            {S.grossLoss>0&&<div style={{background:C.red+"10",border:`1px solid ${C.red}22`,borderRadius:5,padding:"3px 8px",flex:1,minWidth:60}}>
+                                              <div style={{color:C.faint,fontSize:7,letterSpacing:0.8}}>GROSS LOSS</div>
+                                              <div style={{color:C.red,fontWeight:900,fontSize:11,fontFamily:"monospace"}}>{fmtPips(-S.grossLoss)}</div>
+                                              {avgL!=null&&<div style={{color:C.red+"77",fontSize:7.5,fontFamily:"monospace"}}>avg {fmtPips(-avgL)}/trade</div>}
+                                            </div>}
+                                          </div>
+                                          <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                                            {conv!=null&&<div style={{background:conv>=0?C.green+"0a":C.red+"0a",border:`1px solid ${conv>=0?C.green+"33":C.red+"33"}`,borderRadius:5,padding:"3px 8px",flex:1,minWidth:60}}>
+                                              <div style={{color:C.faint,fontSize:7}}>AVG WIN − AVG LOSS</div>
+                                              <div style={{color:conv>=0?C.green:C.red,fontWeight:900,fontSize:11,fontFamily:"monospace"}}>{fmtPips(conv)}</div>
+                                            </div>}
+                                            <div style={{background:net>=0?C.green+"0a":C.red+"0a",border:`1px solid ${net>=0?C.green+"44":C.red+"44"}`,borderRadius:5,padding:"3px 8px",flex:1,minWidth:60}}>
+                                              <div style={{color:C.faint,fontSize:7}}>NET TOTAL</div>
+                                              <div style={{color:net>=0?C.green:C.red,fontWeight:900,fontSize:12,fontFamily:"monospace"}}>{fmtPips(net)}</div>
+                                            </div>
+                                          </div>
+                                          {/* Net per RR chips */}
+                                          {(()=>{
+                                            const chips = Object.entries(rrNetMap).sort((a,b)=>parseFloat(a[0].split(":")[1]||0)-parseFloat(b[0].split(":")[1]||0)).map(([rr,v])=>({rr,net:v.w-v.l})).filter(c=>c.net!==0);
+                                            if(!chips.length) return null;
+                                            return (
+                                              <div>
+                                                <div style={{color:C.faint,fontSize:7,letterSpacing:0.8,marginBottom:3}}>NET PER RR</div>
+                                                <div style={{display:"flex",flexWrap:"wrap",gap:3}}>
+                                                  {chips.map(c=>(
+                                                    <div key={c.rr} style={{background:c.net>=0?C.green+"0d":C.red+"0d",border:`1px solid ${c.net>=0?C.green+"33":C.red+"33"}`,borderRadius:4,padding:"2px 7px",textAlign:"center"}}>
+                                                      <div style={{color:C.yellow,fontSize:7.5,fontFamily:"monospace",fontWeight:700}}>{c.rr}</div>
+                                                      <div style={{color:c.net>=0?C.green:C.red,fontWeight:900,fontSize:9,fontFamily:"monospace"}}>{fmtP(c.net)}</div>
+                                                    </div>
+                                                  ))}
+                                                </div>
+                                              </div>
+                                            );
+                                          })()}
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })()}
+
+                        {/* HIT RATE PER RR */}
+                        {res.rrRangeStatsList?.length > 0 && (
+                          <div style={sectionStyle}>
+                            {secHdr("📊 HIT RATE PER RR (BERDASARKAN TARGET RANGE)",C.green)}
+                            <div style={{padding:"8px 12px",display:"flex",flexDirection:"column",gap:4}}>
+                              {res.rrRangeStatsList.map(r=>(
+                                <div key={r.rr} style={{display:"flex",alignItems:"center",gap:6,borderBottom:`1px solid ${C.faint}14`,paddingBottom:4}}>
+                                  <span style={{color:C.yellow,fontWeight:800,fontSize:10,fontFamily:"monospace",minWidth:32}}>{r.rr}</span>
+                                  <div style={{flex:1,height:5,background:C.faint+"33",borderRadius:20,overflow:"hidden"}}>
+                                    <div style={{width:`${r.hitPct}%`,height:"100%",background:r.hitPct>=60?C.green:r.hitPct>=40?C.yellow:C.red,borderRadius:20}}/>
+                                  </div>
+                                  <span style={{color:r.hitPct>=60?C.green:r.hitPct>=40?C.yellow:C.red,fontWeight:900,fontSize:11,fontFamily:"monospace",minWidth:36,textAlign:"right"}}>{r.hitPct}%</span>
+                                  <span style={{color:C.dim,fontSize:9,fontFamily:"monospace",minWidth:40}}>{r.hitCount}/{r.validTotal}</span>
+                                  {r.avgWinPips!=null&&<span style={{background:C.green+"12",border:`1px solid ${C.green}25`,borderRadius:4,padding:"1px 6px",fontSize:8,color:C.green,fontWeight:800,fontFamily:"monospace"}}>+{Math.round(r.avgWinPips)}p</span>}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* WIN PIPS PER RR */}
+                        {res.winPipsPerRRList?.length > 0 && (
+                          <div style={sectionStyle}>
+                            {secHdr("💰 DETAIL WIN PIPS PER RR",C.green)}
+                            <div style={{padding:"8px 12px",display:"flex",flexDirection:"column",gap:5}}>
+                              {res.winPipsPerRRList.map(row=>(
+                                <div key={row.rr} style={{borderBottom:`1px solid ${C.faint}14`,paddingBottom:5}}>
+                                  <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+                                    <span style={{color:C.yellow,fontWeight:800,fontSize:10,fontFamily:"monospace"}}>{row.rr}</span>
+                                    <span style={{color:C.green,fontWeight:700,fontSize:9,fontFamily:"monospace"}}>avg +{Math.round(row.entries.reduce((a,b)=>a+b.winPips,0)/row.entries.length)}p</span>
+                                    <span style={{color:C.faint,fontSize:8}}>×{row.entries.length}</span>
+                                  </div>
+                                  <div style={{display:"flex",flexWrap:"wrap",gap:3}}>
+                                    {row.entries.map((e,i)=>(
+                                      <div key={i} style={{background:C.green+"0d",border:`1px solid ${C.green+"22"}`,borderRadius:4,padding:"2px 7px",fontSize:8.5,fontFamily:"monospace"}}>
+                                        <span style={{color:e.direction==="Buy"?C.green:C.red,fontWeight:700,marginRight:3}}>{e.direction==="Buy"?"▲":"▼"}</span>
+                                        <span style={{color:C.text}}>{e.pair}</span>
+                                        <span style={{color:C.green,fontWeight:800,marginLeft:4}}>+{Math.round(e.winPips)}p</span>
+                                        <span style={{color:C.faint,fontSize:7.5,marginLeft:3}}>SL:{e.slPips}p</span>
+                                        {e.targetRange!=null&&<span style={{color:C.yellow+"88",fontSize:7.5,marginLeft:3}}>🎯1:{e.targetRange%1===0?e.targetRange:e.targetRange.toFixed(1)}</span>}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* LOSS PIPS PER RR */}
+                        {res.lossPipsPerRRList?.length > 0 && (
+                          <div style={sectionStyle}>
+                            {secHdr("🔻 DETAIL LOSS PIPS PER RR",C.red)}
+                            <div style={{padding:"8px 12px",display:"flex",flexDirection:"column",gap:5}}>
+                              {res.lossPipsPerRRList.map(row=>(
+                                <div key={row.rr} style={{borderBottom:`1px solid ${C.faint}14`,paddingBottom:5}}>
+                                  <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+                                    <span style={{color:C.yellow,fontWeight:800,fontSize:10,fontFamily:"monospace"}}>{row.rr==="(global)"?"LOSS":row.rr}</span>
+                                    <span style={{color:C.red,fontWeight:700,fontSize:9,fontFamily:"monospace"}}>avg −{Math.round(row.entries.reduce((a,b)=>a+b.lossPips,0)/row.entries.length)}p</span>
+                                    <span style={{color:C.red+"88",fontSize:8,fontFamily:"monospace"}}>total −{Math.round(row.entries.reduce((a,b)=>a+b.lossPips,0))}p</span>
+                                  </div>
+                                  <div style={{display:"flex",flexWrap:"wrap",gap:3}}>
+                                    {row.entries.map((e,i)=>(
+                                      <div key={i} style={{background:C.red+"0d",border:`1px solid ${C.red+"22"}`,borderRadius:4,padding:"2px 7px",fontSize:8.5,fontFamily:"monospace"}}>
+                                        <span style={{color:e.direction==="Buy"?C.green:C.red,fontWeight:700,marginRight:3}}>{e.direction==="Buy"?"▲":"▼"}</span>
+                                        <span style={{color:C.text}}>{e.pair}</span>
+                                        <span style={{color:C.red,fontWeight:800,marginLeft:4}}>−{Math.round(e.lossPips)}p</span>
+                                        <span style={{color:C.faint,fontSize:7.5,marginLeft:3}}>SL:{e.slPips}p</span>
+                                        {e.targetRange!=null&&<span style={{color:C.yellow+"88",fontSize:7.5,marginLeft:3}}>🎯1:{e.targetRange%1===0?e.targetRange:e.targetRange.toFixed(1)}</span>}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* STATISTIK TARGET RANGE + HIT MAX TP */}
+                        {(()=>{
+                          const trs = res.targetRangeStats;
+                          const hrs = res.hitRangeStats;
+                          if (!trs && !hrs) return null;
+                          return (
+                            <div style={sectionStyle}>
+                              {secHdr("🎯 STATISTIK TARGET RANGE  ·  HIT MAX TP",C.yellow)}
+                              <div style={{padding:"8px 12px",display:"flex",flexDirection:"column",gap:6}}>
+                                {/* Summary chips */}
+                                <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                                  {trs?.avgTargetRange!=null&&<div style={{background:C.yellow+"10",border:`1px solid ${C.yellow}22`,borderRadius:6,padding:"5px 10px",flex:1,textAlign:"center"}}>
+                                    <div style={{color:C.yellow,fontWeight:900,fontSize:13,fontFamily:"monospace"}}>1:{trs.avgTargetRange.toFixed(1)}</div>
+                                    <div style={{color:C.faint,fontSize:7.5,letterSpacing:0.8}}>AVG TARGET</div>
+                                  </div>}
+                                  {trs?.avgSlPips!=null&&<div style={{background:C.red+"0a",border:`1px solid ${C.red}22`,borderRadius:6,padding:"5px 10px",flex:1,textAlign:"center"}}>
+                                    <div style={{color:C.red,fontWeight:900,fontSize:13,fontFamily:"monospace"}}>{Math.round(trs.avgSlPips)}p</div>
+                                    <div style={{color:C.faint,fontSize:7.5,letterSpacing:0.8}}>AVG SL</div>
+                                  </div>}
+                                  {trs?.minSlPips!=null&&<div style={{background:C.green+"0a",border:`1px solid ${C.green}22`,borderRadius:6,padding:"5px 10px",flex:1,textAlign:"center"}}>
+                                    <div style={{color:C.green,fontWeight:900,fontSize:13,fontFamily:"monospace"}}>{trs.minSlPips}p</div>
+                                    <div style={{color:C.faint,fontSize:7.5,letterSpacing:0.8}}>SL MIN</div>
+                                  </div>}
+                                  {trs?.maxSlPips!=null&&<div style={{background:C.red+"0a",border:`1px solid ${C.red}22`,borderRadius:6,padding:"5px 10px",flex:1,textAlign:"center"}}>
+                                    <div style={{color:C.red,fontWeight:900,fontSize:13,fontFamily:"monospace"}}>{trs.maxSlPips}p</div>
+                                    <div style={{color:C.faint,fontSize:7.5,letterSpacing:0.8}}>SL MAX</div>
+                                  </div>}
+                                  {hrs?.total>0&&<div style={{background:hrs.pct>=60?C.green+"12":hrs.pct>=40?C.yellow+"12":C.red+"12",border:`1px solid ${hrs.pct>=60?C.green:hrs.pct>=40?C.yellow:C.red}33`,borderRadius:6,padding:"5px 10px",flex:1,textAlign:"center"}}>
+                                    <div style={{color:hrs.pct>=60?C.green:hrs.pct>=40?C.yellow:C.red,fontWeight:900,fontSize:13,fontFamily:"monospace"}}>{hrs.pct}%</div>
+                                    <div style={{color:C.faint,fontSize:7.5,letterSpacing:0.8}}>HIT MAX TP {hrs.hit}/{hrs.total}</div>
+                                  </div>}
+                                </div>
+                                {/* Hit list */}
+                                {hrs?.hitList?.length>0&&(
+                                  <div>
+                                    <div style={{color:C.green,fontSize:8,fontWeight:700,marginBottom:3}}>✓ HIT ({hrs.hitList.length})</div>
+                                    <div style={{display:"flex",flexWrap:"wrap",gap:3}}>
+                                      {hrs.hitList.map((e,i)=>(
+                                        <div key={i} style={{background:C.green+"0d",border:`1px solid ${C.green}25`,borderRadius:4,padding:"2px 7px",fontSize:8.5,fontFamily:"monospace",display:"flex",gap:4,alignItems:"center"}}>
+                                          <span style={{color:e.direction==="Buy"?C.green:C.red,fontWeight:700}}>{e.direction==="Buy"?"▲":"▼"}</span>
+                                          <span style={{color:C.text}}>{e.pair}</span>
+                                          <span style={{color:C.yellow,fontSize:8}}>🎯1:{e.targetRatio}</span>
+                                          <span style={{color:C.green,fontSize:8}}>✓1:{e.maxWinRatio}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                                {/* Miss list */}
+                                {hrs?.missList?.length>0&&(
+                                  <div>
+                                    <div style={{color:C.red,fontSize:8,fontWeight:700,marginBottom:3}}>✕ MISS ({hrs.missList.length})</div>
+                                    <div style={{display:"flex",flexWrap:"wrap",gap:3}}>
+                                      {hrs.missList.map((e,i)=>(
+                                        <div key={i} style={{background:C.red+"0d",border:`1px solid ${C.red}25`,borderRadius:4,padding:"2px 7px",fontSize:8.5,fontFamily:"monospace",display:"flex",gap:4,alignItems:"center"}}>
+                                          <span style={{color:e.direction==="Buy"?C.green:C.red,fontWeight:700}}>{e.direction==="Buy"?"▲":"▼"}</span>
+                                          <span style={{color:C.text}}>{e.pair}</span>
+                                          <span style={{color:C.yellow,fontSize:8}}>🎯1:{e.targetRatio}</span>
+                                          <span style={{color:C.red,fontSize:8}}>max1:{e.maxWinRatio>0?e.maxWinRatio:"—"}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    );
+                  })()}
 
                   {/* Download PDF button */}
                   <button className="no-print" onClick={doPrint} disabled={pdfLoading}
